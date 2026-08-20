@@ -365,9 +365,14 @@ def _apply_h3_latent_upscale(
         audio_latent.pop("noise_mask", None)
     work = _join_av(encoded, audio_latent, work)
     notes = [f"{tw}×{th}", "h3_latent"]
-    if pin_frames > 0 and first_pass_images is not None:
+    if pin_frames > 0:
         try:
-            prefix = first_pass_images[:pin_frames]
+            if first_pass_images is not None:
+                prefix = first_pass_images[:pin_frames]
+            else:
+                # Refine-only: first-pass decode is skipped, so re-pin from the
+                # head of the upscaled latent itself (same content, new canvas).
+                prefix = _decode_head_frames(vae, encoded, pin_frames)
             ph, pw = int(prefix.shape[1]), int(prefix.shape[2])
             if pw != tw or ph != th:
                 prefix = _scale_images(prefix, tw, th)
@@ -386,6 +391,25 @@ def _apply_h3_latent_upscale(
     if on_phase:
         on_phase("upscale", 1)
     return work, refine_positive, notes
+
+
+def _decode_head_frames(vae, video_latent: dict, pin_frames: int) -> torch.Tensor:
+    """Decode just the pinned head of an (upscaled) video latent.
+
+    Used when refine-only reuses a cached first-pass latent, so there are no
+    decoded first-pass frames to re-pin from — decode the upscaled head instead.
+    """
+    from .h3_motion_context import steps_for_frames
+
+    samples = video_latent.get("samples") if isinstance(video_latent, dict) else video_latent
+    total_t = int(samples.shape[2])
+    steps = steps_for_frames(pin_frames) or total_t
+    steps = max(1, min(int(steps), total_t))
+    head = dict(video_latent)
+    head.pop("noise_mask", None)
+    head["samples"] = samples[:, :, :steps]
+    frames = _decode_video(vae, head)
+    return frames[:pin_frames]
 
 
 def _repin_after_upscale(
