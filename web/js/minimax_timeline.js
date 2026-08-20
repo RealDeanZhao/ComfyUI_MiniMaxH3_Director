@@ -40,6 +40,8 @@ import {
     taskUsesReferenceAudios,
     taskUsesReferenceImages,
     taskUsesReferenceVideo,
+    fileForComfyUpload,
+    safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import {
     IMAGE_BATCH_STYLES,
@@ -264,11 +266,93 @@ function sanitizeSegmentForPayload(seg) {
     };
 }
 
+function cloneJson(value, fallback) {
+    try {
+        if (value == null) return fallback;
+        return JSON.parse(JSON.stringify(value));
+    } catch {
+        return fallback;
+    }
+}
+
+function sanitizeBatchGlobalCommon(gc) {
+    const src = gc && typeof gc === "object" ? gc : {};
+    return {
+        commonEnabled: !!src.commonEnabled,
+        commonCollapsed: !!src.commonCollapsed,
+        prompt: src.prompt || "",
+        refs: Array.isArray(src.refs) ? src.refs.map(sanitizeRefImage) : [],
+        refAudios: Array.isArray(src.refAudios) ? src.refAudios.map(sanitizeRefAudio) : [],
+        refVideos: Array.isArray(src.refVideos)
+            ? src.refVideos.map(sanitizeRefVideo)
+            : (Array.isArray(src.ref_videos) ? src.ref_videos.map(sanitizeRefVideo) : []),
+    };
+}
+
+/** Persistable t2v/i2v/r2v snapshot (no preview frames). */
+function sanitizeBatchWorkspace(ws) {
+    if (!ws || typeof ws !== "object" || !Array.isArray(ws.segments) || !ws.segments.length) {
+        return null;
+    }
+    return {
+        selectedIndex: Number.isFinite(Number(ws.selectedIndex)) ? Number(ws.selectedIndex) : 0,
+        editMode: ws.editMode || "segment",
+        runSelectEnabled: !!ws.runSelectEnabled,
+        runSelection: Array.isArray(ws.runSelection) ? [...ws.runSelection] : [],
+        segments: ws.segments.map(sanitizeSegmentForPayload),
+        globalCommon: sanitizeBatchGlobalCommon(ws.globalCommon),
+    };
+}
+
+function sanitizeVideoMedia(video) {
+    if (!video || typeof video !== "object") return video;
+    const hasFile = !!(video.videoFile || video.fileName);
+    const dropFrames = hasFile
+        || (Array.isArray(video.frames) && video.frames.length > 8);
+    return { ...video, frames: dropFrames ? [] : (video.frames || []) };
+}
+
+/** Persistable v2v/rv2v snapshot (no decoded frame blobs). */
+function sanitizeVideoWorkspace(ws) {
+    if (!ws || typeof ws !== "object") return null;
+    return {
+        selectedIndex: Number.isFinite(Number(ws.selectedIndex)) ? Number(ws.selectedIndex) : 0,
+        currentFrame: Math.max(0, Number(ws.currentFrame) || 0),
+        editMode: ws.editMode || "global",
+        runSelectEnabled: !!ws.runSelectEnabled,
+        runSelection: Array.isArray(ws.runSelection) ? [...ws.runSelection] : [],
+        totalFrames: ws.totalFrames,
+        frameRate: ws.frameRate,
+        storageWidth: ws.storageWidth || 0,
+        storageHeight: ws.storageHeight || 0,
+        segments: Array.isArray(ws.segments) ? ws.segments.map(sanitizeSegmentForPayload) : [],
+        video: sanitizeVideoMedia(ws.video || {}),
+        videoClips: Array.isArray(ws.videoClips) ? ws.videoClips.map(sanitizeVideoMedia) : [],
+        globalCommon: sanitizeBatchGlobalCommon(ws.globalCommon),
+    };
+}
+
 function stripTimelineEphemeralFields(timeline) {
     if (!timeline || typeof timeline !== "object") return;
     delete timeline.videoWorkspace;
     delete timeline.batchWorkspace;
     delete timeline.fl2vWorkspace;
+    if (timeline.batchWorkspaces && typeof timeline.batchWorkspaces === "object") {
+        const cleaned = {};
+        for (const [key, ws] of Object.entries(timeline.batchWorkspaces)) {
+            const safe = sanitizeBatchWorkspace(ws);
+            if (safe) cleaned[key] = safe;
+        }
+        timeline.batchWorkspaces = cleaned;
+    }
+    if (timeline.videoWorkspaces && typeof timeline.videoWorkspaces === "object") {
+        const cleaned = {};
+        for (const [key, ws] of Object.entries(timeline.videoWorkspaces)) {
+            const safe = sanitizeVideoWorkspace(ws);
+            if (safe) cleaned[key] = safe;
+        }
+        timeline.videoWorkspaces = cleaned;
+    }
     // Shallow-cloned payloads still share nested refs with live state — reassign, don't mutate.
     if (Array.isArray(timeline.segments)) {
         timeline.segments = timeline.segments.map(sanitizeSegmentForPayload);
@@ -506,9 +590,20 @@ const STYLES = `
   max-height:100%
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source{align-content:stretch}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){
+  /* Header stays compact; leftover height goes to the prompt row (not a blank gap). */
+  grid-template-rows:auto minmax(0,1fr);
+  align-content:stretch
+}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain .bd-batch-head,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-head,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-head{align-self:start}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain .bd-batch-prompts,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-prompts{height:100%;min-height:0;max-height:100%;overflow:hidden}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-prompts,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-prompts{
+  height:100%;min-height:0;max-height:100%;overflow:hidden;align-self:stretch
+}
 .bd-modal-overlay{position:absolute;inset:0;z-index:200;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:10px;box-sizing:border-box;border-radius:6px}
 .bd-modal{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:12px;width:100%;max-width:460px;max-height:calc(100% - 8px);display:flex;flex-direction:column;gap:10px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
 .bd-modal-title{color:#e0e0e0;font-size:12px;font-weight:600;line-height:1.35}
@@ -836,10 +931,11 @@ function coerceTimelineFps(value, fallback = 24) {
 }
 
 async function uploadToInput(file) {
+    const uploadFile = fileForComfyUpload(file);
     const body = new FormData();
-    body.append("image", file);
+    body.append("image", uploadFile, uploadFile.name);
     body.append("type", "input");
-    body.append("overwrite", "true");
+    body.append("overwrite", "false");
     const resp = await api.fetchApi("/upload/image", { method: "POST", body });
     if (!resp.ok) {
         const text = await resp.text();
@@ -849,6 +945,7 @@ async function uploadToInput(file) {
 }
 
 async function uploadVideoChunked(file, onProgress) {
+    const filename = safeUploadFilename(file?.name, file?.type);
     const uploadId = crypto.randomUUID();
     const totalChunks = Math.ceil(file.size / MINIMAX_CHUNK_SIZE);
     for (let i = 0; i < totalChunks; i++) {
@@ -858,8 +955,8 @@ async function uploadVideoChunked(file, onProgress) {
         body.append("upload_id", uploadId);
         body.append("chunk_index", String(i));
         body.append("total_chunks", String(totalChunks));
-        body.append("filename", file.name);
-        body.append("chunk", file.slice(start, end), `${file.name}.part`);
+        body.append("filename", filename);
+        body.append("chunk", file.slice(start, end), `${filename}.part`);
         const resp = await api.fetchApi("/minimax/director/upload_chunk", { method: "POST", body });
         if (!resp.ok) {
             const text = await resp.text();
@@ -1870,8 +1967,9 @@ class MiniMaxH3DirectorEditor {
     _syncBatchRunHighlight() {
         if (!this.isImageBatch?.() || !this.batchList) return;
         const runningIdx = this._runHighlightSeg;
-        this.batchList.querySelectorAll(".bd-batch-card").forEach((card, i) => {
-            card.classList.toggle("running", i === runningIdx);
+        this.batchList.querySelectorAll(".bd-batch-card").forEach((card) => {
+            const i = parseInt(card.dataset.batchIndex, 10);
+            card.classList.toggle("running", Number.isFinite(i) && i === runningIdx);
         });
         this._syncR2vCardSelection?.();
     }
@@ -1912,6 +2010,7 @@ class MiniMaxH3DirectorEditor {
             };
         }
         if (this.isImageBatch()) {
+            this._persistCurrentBatchWorkspace();
             const taskKey = this.getTaskKey();
             const i2iSrc = (taskKey === "i2i" || taskKey === "i2v") ? this.getI2iSourceDimensions() : null;
             const outMode = imageBatchRequiresFixedOutput(taskKey)
@@ -1999,6 +2098,7 @@ class MiniMaxH3DirectorEditor {
             ...this._runSelectionPayload(),
             };
         }
+        this._persistCurrentVideoWorkspace();
         const video = { ...(this.timeline.video || {}) };
         const frameMap = video.frameMap?.length ? video.frameMap : [];
         const src = this.getSourceDimensions();
@@ -2803,12 +2903,16 @@ class MiniMaxH3DirectorEditor {
             this.canvas.classList.remove("bd-grab");
             if (hit?.type === "run-check" || hit?.type === "split") {
                 this.canvas.style.cursor = "pointer";
+                this.canvas.title = "";
             } else if (hit?.type === "edge") {
                 // Edge drag is always horizontal (change start/length); keep ↔ cursor.
                 this.canvas.style.cursor = "ew-resize";
                 this.canvas.title = this.isFl2vMode()
                     ? t("tooltip.dragFl2vDuration")
                     : "";
+            } else if (this.needsSourceVideoUpload?.() && (hit?.type === "segment" || hit?.type === "edge" || !hit)) {
+                this.canvas.style.cursor = "pointer";
+                this.canvas.title = t("canvas.clickUploadVideo");
             } else if (hit?.type === "segment" && (this.isFl2vMode() || this.isR2vBatch() || this.timeline.segments.length >= 2)) {
                 this.canvas.classList.add("bd-grab");
                 this.canvas.style.cursor = "";
@@ -2911,6 +3015,11 @@ class MiniMaxH3DirectorEditor {
     hasVideo() {
         const v = this.timeline?.video || {};
         return !!(this.getVideoClips().length || v.videoFile || this._legacyFrames.length || v.frames?.length);
+    }
+
+    /** v2v / rv2v empty canvas: placeholder says click to upload. */
+    needsSourceVideoUpload() {
+        return this.getDirectorMode() === "video" && !this.hasVideo();
     }
 
     getVideoClips() {
@@ -3212,9 +3321,10 @@ class MiniMaxH3DirectorEditor {
         const runSelectOn = this.isRunSelectEnabled() && this.supportsRunSelect();
         const focusSel = this.isR2vBatch();
         const cards = this.batchList.querySelectorAll(".bd-batch-card");
-        cards.forEach((el, i) => {
+        cards.forEach((el) => {
+            const i = parseInt(el.dataset.batchIndex, 10);
+            if (!Number.isFinite(i)) return;
             const runOn = !runSelectOn || this.isSegmentRunEnabled(i);
-            // t2v/i2v: no focus "selected" border — only run-on/run-skipped when 选择运行.
             el.classList.toggle("selected", focusSel && i === this.selectedIndex);
             el.classList.toggle("run-on", runSelectOn && runOn);
             el.classList.toggle("run-skipped", runSelectOn && !runOn);
@@ -3239,64 +3349,64 @@ class MiniMaxH3DirectorEditor {
         this.onGlobalField("taskType", value);
     }
 
-    /** Snapshot v2v/rv2v workspace before switching to t2i / batch / gen modes. */
-    _stashVideoWorkspace() {
+    /** Snapshot v2v/rv2v workspace for a specific task key (session + persist). */
+    _captureVideoWorkspace() {
         const video = this.timeline.video || {};
         const clips = this.timeline.videoClips || [];
-        const hasVid = !!(
-            clips.length
-            || video.videoFile
-            || video.fileName
-            || this._legacyFrames?.length
-            || video.frames?.length
-        );
-        const segs = this.timeline.segments || [];
-        if (!hasVid && !segs.length) return;
-
-        this.timeline.videoWorkspace = {
-            segments: JSON.parse(JSON.stringify(segs)),
+        const g = this.timeline.global || {};
+        return {
+            segments: cloneJson(this.timeline.segments || [], []),
             selectedIndex: this.selectedIndex,
             currentFrame: this.currentFrame,
             editMode: this.timeline.editMode || "global",
             runSelectEnabled: !!this.timeline.runSelectEnabled,
             runSelection: Array.isArray(this.timeline.runSelection)
                 ? [...this.timeline.runSelection]
-                : undefined,
-            video: JSON.parse(JSON.stringify(video)),
-            videoClips: JSON.parse(JSON.stringify(clips)),
+                : [],
+            video: cloneJson(video, {}),
+            videoClips: cloneJson(clips, []),
             totalFrames: this.timeline.totalFrames ?? this.getTotalFrames(),
             frameRate: this.timeline.frameRate ?? this.getFrameRate(),
             legacyFrames: this._legacyFrames?.length ? [...this._legacyFrames] : [],
             storageWidth: this._storageWidth || 0,
             storageHeight: this._storageHeight || 0,
+            globalCommon: {
+                commonEnabled: !!g.commonEnabled,
+                commonCollapsed: !!g.commonCollapsed,
+                prompt: g.prompt || "",
+                refs: cloneJson(g.refs, []),
+                refAudios: cloneJson(g.refAudios || g.ref_audios, []),
+                refVideos: cloneJson(g.refVideos || g.ref_videos, []),
+            },
         };
     }
 
-    /** Restore v2v/rv2v workspace after returning from t2i / batch / gen. */
-    _restoreVideoWorkspace() {
-        const ws = this.timeline.videoWorkspace;
-        if (!ws || typeof ws !== "object") {
-            this.normalizeSegments();
-            this.restoreVideoFromTimeline();
-            this.updateStageVisibility();
-            return false;
-        }
-
+    _applyVideoWorkspace(ws) {
+        if (!ws || typeof ws !== "object") return false;
         if (ws.video && typeof ws.video === "object") {
-            this.timeline.video = JSON.parse(JSON.stringify(ws.video));
+            this.timeline.video = cloneJson(ws.video, {});
+        } else {
+            this.timeline.video = {
+                fileName: "", videoFile: "", subfolder: "", type: "input", frames: [], frameMap: [],
+            };
         }
-        if (Array.isArray(ws.videoClips)) {
-            this.timeline.videoClips = JSON.parse(JSON.stringify(ws.videoClips));
-        }
-        if (Array.isArray(ws.segments) && ws.segments.length) {
-            this.timeline.segments = JSON.parse(JSON.stringify(ws.segments));
-        }
+        this.timeline.videoClips = Array.isArray(ws.videoClips) ? cloneJson(ws.videoClips, []) : [];
+        this.timeline.segments = Array.isArray(ws.segments) ? cloneJson(ws.segments, []) : [];
         if (ws.totalFrames != null) this.timeline.totalFrames = ws.totalFrames;
         if (ws.frameRate != null) this.timeline.frameRate = ws.frameRate;
-        if (ws.editMode) this.timeline.editMode = ws.editMode;
-        if (ws.runSelectEnabled != null) this.timeline.runSelectEnabled = !!ws.runSelectEnabled;
-        if (Array.isArray(ws.runSelection)) this.timeline.runSelection = [...ws.runSelection];
-
+        this.timeline.editMode = ws.editMode || "global";
+        this.timeline.runSelectEnabled = !!ws.runSelectEnabled;
+        this.timeline.runSelection = Array.isArray(ws.runSelection) ? [...ws.runSelection] : [];
+        const gc = ws.globalCommon || {};
+        this.timeline.global = this.timeline.global || { refs: [] };
+        this.timeline.global.commonEnabled = !!gc.commonEnabled;
+        this.timeline.global.commonCollapsed = !!gc.commonCollapsed;
+        this.timeline.global.prompt = gc.prompt || "";
+        this.timeline.global.refs = cloneJson(gc.refs, []);
+        this.timeline.global.refAudios = cloneJson(gc.refAudios, []);
+        this.timeline.global.refVideos = cloneJson(gc.refVideos, []);
+        if (this.globalPrompt) this.globalPrompt.value = this.timeline.global.prompt || "";
+        if (this.globalPromptWidget) this.globalPromptWidget.value = this.timeline.global.prompt || "";
         this.selectedIndex = clamp(
             ws.selectedIndex ?? 0,
             0,
@@ -3305,6 +3415,8 @@ class MiniMaxH3DirectorEditor {
         this.currentFrame = Math.max(0, ws.currentFrame ?? 0);
         if (Array.isArray(ws.legacyFrames) && ws.legacyFrames.length) {
             this._legacyFrames = [...ws.legacyFrames];
+        } else {
+            this._legacyFrames = [];
         }
         if (ws.storageWidth) this._storageWidth = ws.storageWidth;
         if (ws.storageHeight) this._storageHeight = ws.storageHeight;
@@ -3320,52 +3432,209 @@ class MiniMaxH3DirectorEditor {
         if (this.totalFramesWidget) this.totalFramesWidget.value = total;
         this.updateVideoNameLabel();
         this.updateStageVisibility();
-        // Live state is now in timeline.*; drop the snapshot so later edits
-        // cannot be overwritten by a stale workspace on the next mode switch.
-        this.timeline.videoWorkspace = null;
         return true;
     }
 
-    /** Snapshot prompt-batch (r2v/r2i/…) groups before switching to video / gen. */
-    _stashBatchWorkspace() {
-        const segs = this.timeline.segments || [];
-        if (!segs.length) return;
-        // Only stash when current segments look like batch groups (have prompt/refs/fc).
-        this.timeline.batchWorkspace = {
-            segments: JSON.parse(JSON.stringify(segs)),
+    _resetVideoWorkspaceLive() {
+        this._clearVideoState();
+        this.timeline.segments = [];
+        this.timeline.editMode = "global";
+        this.selectedIndex = 0;
+        this.currentFrame = 0;
+        this._clearLiveRunSelection();
+        this.timeline.global = this.timeline.global || { refs: [] };
+        this.timeline.global.prompt = "";
+        this.timeline.global.refs = [];
+        this.timeline.global.refAudios = [];
+        this.timeline.global.refVideos = [];
+        this.timeline.global.referenceVideo = {};
+        this.timeline.global.continuousReference = false;
+        this.timeline.global.commonEnabled = false;
+        this.timeline.global.commonCollapsed = false;
+        if (this.globalPrompt) this.globalPrompt.value = "";
+        if (this.globalPromptWidget) this.globalPromptWidget.value = "";
+        this.updateVideoNameLabel();
+    }
+
+    _stashVideoWorkspace(taskKey) {
+        const key = resolveTaskKey(taskKey || this.getTaskKey());
+        if (getDirectorMode(key) !== "video") return;
+        this._videoWsMem = this._videoWsMem || {};
+        const full = this._captureVideoWorkspace();
+        this._videoWsMem[key] = full;
+        this.timeline.videoWorkspaces = this.timeline.videoWorkspaces || {};
+        const safe = sanitizeVideoWorkspace(full);
+        if (safe) this.timeline.videoWorkspaces[key] = safe;
+    }
+
+    _persistCurrentVideoWorkspace() {
+        if (this.getDirectorMode() !== "video") return;
+        const key = this.getTaskKey();
+        if (getDirectorMode(key) !== "video") return;
+        const g = this.timeline.global || {};
+        const safe = sanitizeVideoWorkspace({
+            segments: this.timeline.segments || [],
+            selectedIndex: this.selectedIndex,
+            currentFrame: this.currentFrame,
+            editMode: this.timeline.editMode || "global",
+            runSelectEnabled: !!this.timeline.runSelectEnabled,
+            runSelection: this.timeline.runSelection,
+            video: this.timeline.video || {},
+            videoClips: this.timeline.videoClips || [],
+            totalFrames: this.timeline.totalFrames ?? this.getTotalFrames(),
+            frameRate: this.timeline.frameRate ?? this.getFrameRate(),
+            storageWidth: this._storageWidth || 0,
+            storageHeight: this._storageHeight || 0,
+            globalCommon: {
+                commonEnabled: !!g.commonEnabled,
+                commonCollapsed: !!g.commonCollapsed,
+                prompt: g.prompt || "",
+                refs: g.refs,
+                refAudios: g.refAudios || g.ref_audios,
+                refVideos: g.refVideos || g.ref_videos,
+            },
+        });
+        if (!safe) return;
+        this.timeline.videoWorkspaces = this.timeline.videoWorkspaces || {};
+        this.timeline.videoWorkspaces[key] = safe;
+    }
+
+    _restoreVideoWorkspace(taskKey) {
+        const key = resolveTaskKey(taskKey || this.getTaskKey());
+        const mem = this._videoWsMem?.[key];
+        const persisted = this.timeline.videoWorkspaces?.[key];
+        const ws = mem || persisted;
+        return this._applyVideoWorkspace(ws);
+    }
+
+    _switchToVideoTaskWorkspace(prevTaskKey, currentKey) {
+        if (prevTaskKey && getDirectorMode(prevTaskKey) === "video" && prevTaskKey !== currentKey) {
+            this._stashVideoWorkspace(prevTaskKey);
+            this._clearLiveRunSelection();
+        }
+        if (this._restoreVideoWorkspace(currentKey)) return;
+        this._resetVideoWorkspaceLive();
+    }
+
+    _captureBatchWorkspace() {
+        const g = this.timeline.global || {};
+        return {
+            segments: cloneJson(this.timeline.segments || [], []),
             selectedIndex: this.selectedIndex,
             editMode: this.timeline.editMode || "segment",
             runSelectEnabled: !!this.timeline.runSelectEnabled,
             runSelection: Array.isArray(this.timeline.runSelection)
                 ? [...this.timeline.runSelection]
-                : undefined,
-            output: this.timeline.output
-                ? JSON.parse(JSON.stringify(this.timeline.output))
-                : undefined,
+                : [],
+            globalCommon: {
+                commonEnabled: !!g.commonEnabled,
+                commonCollapsed: !!g.commonCollapsed,
+                prompt: g.prompt || "",
+                refs: cloneJson(g.refs, []),
+                refAudios: cloneJson(g.refAudios || g.ref_audios, []),
+                refVideos: cloneJson(g.refVideos || g.ref_videos, []),
+            },
         };
     }
 
-    /** Restore prompt-batch groups after returning from rv2v / video / gen. */
-    _restoreBatchWorkspace() {
-        const ws = this.timeline.batchWorkspace;
-        if (!ws || typeof ws !== "object" || !Array.isArray(ws.segments) || !ws.segments.length) {
-            return false;
-        }
-        this.timeline.segments = JSON.parse(JSON.stringify(ws.segments));
-        if (ws.editMode) this.timeline.editMode = ws.editMode;
-        if (ws.runSelectEnabled != null) this.timeline.runSelectEnabled = !!ws.runSelectEnabled;
-        if (Array.isArray(ws.runSelection)) this.timeline.runSelection = [...ws.runSelection];
-        if (ws.output && typeof ws.output === "object") {
-            this.timeline.output = { ...(this.timeline.output || {}), ...JSON.parse(JSON.stringify(ws.output)) };
-        }
+    _applyBatchWorkspace(ws) {
+        if (!ws || !Array.isArray(ws.segments) || !ws.segments.length) return false;
+        this.timeline.segments = cloneJson(ws.segments, []);
+        this.timeline.editMode = ws.editMode || "segment";
+        this.timeline.runSelectEnabled = !!ws.runSelectEnabled;
+        this.timeline.runSelection = Array.isArray(ws.runSelection) ? [...ws.runSelection] : [];
+        const gc = ws.globalCommon || {};
+        this.timeline.global = this.timeline.global || { refs: [] };
+        this.timeline.global.commonEnabled = !!gc.commonEnabled;
+        this.timeline.global.commonCollapsed = !!gc.commonCollapsed;
+        this.timeline.global.prompt = gc.prompt || "";
+        this.timeline.global.refs = cloneJson(gc.refs, []);
+        this.timeline.global.refAudios = cloneJson(gc.refAudios, []);
+        this.timeline.global.refVideos = cloneJson(gc.refVideos, []);
         this.selectedIndex = clamp(
             ws.selectedIndex ?? 0,
             0,
             Math.max(0, this.timeline.segments.length - 1),
         );
-        // Drop snapshot after restore so later batch edits are not clobbered by a stale stash.
-        this.timeline.batchWorkspace = null;
+        if (this.globalPrompt) this.globalPrompt.value = this.timeline.global.prompt || "";
+        if (this.globalPromptWidget) this.globalPromptWidget.value = this.timeline.global.prompt || "";
         return true;
+    }
+
+    _resetBatchWorkspaceLive(taskKey) {
+        const key = resolveTaskKey(taskKey || this.getTaskKey());
+        this.timeline.segments = [newBatchSegment({ durationSec: defaultDurationSec(key) })];
+        this.timeline.editMode = "segment";
+        this.selectedIndex = 0;
+        this._clearLiveRunSelection();
+        this.timeline.global = this.timeline.global || { refs: [] };
+        this.timeline.global.commonEnabled = false;
+        this.timeline.global.commonCollapsed = false;
+        this.timeline.global.prompt = "";
+        this.timeline.global.refs = [];
+        this.timeline.global.refAudios = [];
+        this.timeline.global.refVideos = [];
+        if (this.globalPrompt) this.globalPrompt.value = "";
+        if (this.globalPromptWidget) this.globalPromptWidget.value = "";
+    }
+
+    /** Snapshot t2v / i2v / r2v groups for a specific task key (session + persist). */
+    _stashBatchWorkspace(taskKey) {
+        const key = resolveTaskKey(taskKey || this.getTaskKey());
+        if (!isVideoBatchTask(key)) return;
+        if (this.isImageBatch?.()) flushBatchPromptInputs(this);
+        const segs = this.timeline.segments || [];
+        if (!segs.length) return;
+        this._batchWsMem = this._batchWsMem || {};
+        const full = this._captureBatchWorkspace();
+        this._batchWsMem[key] = full;
+        this.timeline.batchWorkspaces = this.timeline.batchWorkspaces || {};
+        const safe = sanitizeBatchWorkspace(full);
+        if (safe) this.timeline.batchWorkspaces[key] = safe;
+    }
+
+    _persistCurrentBatchWorkspace() {
+        if (!this.isImageBatch?.()) return;
+        const key = this.getTaskKey();
+        if (!isVideoBatchTask(key)) return;
+        const g = this.timeline.global || {};
+        const safe = sanitizeBatchWorkspace({
+            segments: this.timeline.segments || [],
+            selectedIndex: this.selectedIndex,
+            editMode: this.timeline.editMode || "segment",
+            runSelectEnabled: !!this.timeline.runSelectEnabled,
+            runSelection: this.timeline.runSelection,
+            globalCommon: {
+                commonEnabled: !!g.commonEnabled,
+                commonCollapsed: !!g.commonCollapsed,
+                prompt: g.prompt || "",
+                refs: g.refs,
+                refAudios: g.refAudios || g.ref_audios,
+                refVideos: g.refVideos || g.ref_videos,
+            },
+        });
+        if (!safe) return;
+        this.timeline.batchWorkspaces = this.timeline.batchWorkspaces || {};
+        this.timeline.batchWorkspaces[key] = safe;
+    }
+
+    _restoreBatchWorkspace(taskKey) {
+        const key = resolveTaskKey(taskKey || this.getTaskKey());
+        const mem = this._batchWsMem?.[key];
+        const persisted = this.timeline.batchWorkspaces?.[key];
+        const ws = (mem?.segments?.length ? mem : null) || persisted;
+        return this._applyBatchWorkspace(ws);
+    }
+
+    _switchToBatchTaskWorkspace(prevTaskKey, currentKey) {
+        if (prevTaskKey && isVideoBatchTask(prevTaskKey) && prevTaskKey !== currentKey) {
+            this._stashBatchWorkspace(prevTaskKey);
+            this._clearLiveRunSelection();
+        }
+        if (this._restoreBatchWorkspace(currentKey)) return;
+        const externalLocked = (currentKey === "i2v" && this.hasExternalI2vGroups?.())
+            || (currentKey === "r2v" && this.hasExternalR2vGroups?.());
+        if (!externalLocked) this._resetBatchWorkspaceLive(currentKey);
     }
 
     ensureGenTimeline() {
@@ -3576,7 +3845,7 @@ class MiniMaxH3DirectorEditor {
         return true;
     }
 
-    applyTaskLayout(prevMode) {
+    applyTaskLayout(prevMode, prevTaskKey) {
         const mode = this.getDirectorMode();
         const prev = prevMode || "video";
         const wasBatch = prev === "prompt_batch" || prev === "image_batch";
@@ -3585,15 +3854,18 @@ class MiniMaxH3DirectorEditor {
         const isFl2v = mode === "fl2v";
         const wasGen = prev !== "video" && prev !== "prompt_batch" && prev !== "image_batch" && prev !== "fl2v";
         const isGen = mode !== "video" && mode !== "prompt_batch" && mode !== "fl2v";
+        const currentKey = this.getTaskKey();
+        const stashBatchKey = prevTaskKey && isVideoBatchTask(prevTaskKey) ? prevTaskKey : null;
+        const stashVideoKey = prevTaskKey && getDirectorMode(prevTaskKey) === "video" ? prevTaskKey : null;
 
         if (this.isPlaying) this._stopPlay();
 
         if (isFl2v) {
             if (prev === "video") {
-                this._stashVideoWorkspace();
+                this._stashVideoWorkspace(stashVideoKey);
                 this._clearLiveRunSelection();
             } else if (wasBatch) {
-                this._stashBatchWorkspace();
+                this._stashBatchWorkspace(stashBatchKey);
                 this._clearLiveRunSelection();
             }
             if (!this._restoreFl2vWorkspace()) {
@@ -3612,29 +3884,19 @@ class MiniMaxH3DirectorEditor {
                 // Run-select is per workspace: stash video's, then clear live so i2v/batch
                 // does not inherit「选择运行」from rv2v.
                 if (prev === "video") {
-                    this._stashVideoWorkspace();
+                    this._stashVideoWorkspace(stashVideoKey);
                     this._clearLiveRunSelection();
+                    this._clearVideoState();
                 }
-                // Prefer restoring the previous r2v/r2i/i2v batch (prompts + its own run-select).
-                if (!this._restoreBatchWorkspace()) {
-                    const keep = this.timeline.global?.prompt
-                        || this.timeline.segments?.[0]?.prompt
-                        || "";
-                    const keepRefs = Array.isArray(this.timeline.global?.refs) && this.timeline.global.refs.length
-                        ? JSON.parse(JSON.stringify(this.timeline.global.refs))
-                        : [];
-                    this.timeline.segments = [newBatchSegment({
-                        prompt: keep,
-                        negativePrompt: this.negativePromptWidget?.value || "bad video",
-                        refs: keepRefs,
-                    })];
-                    this._clearLiveRunSelection();
-                }
+                this._switchToBatchTaskWorkspace(null, currentKey);
+            } else if (prevTaskKey && prevTaskKey !== currentKey) {
+                // t2v / i2v / r2v used to share one segment list — isolate per task.
+                this._switchToBatchTaskWorkspace(prevTaskKey, currentKey);
             }
             ensureImageBatchTimeline(this);
         } else if (isGen) {
             if (wasBatch) {
-                this._stashBatchWorkspace();
+                this._stashBatchWorkspace(stashBatchKey);
                 this._clearLiveRunSelection();
             }
             if (wasFl2v) {
@@ -3643,7 +3905,7 @@ class MiniMaxH3DirectorEditor {
             }
             if (!wasGen && !wasBatch && !wasFl2v) {
                 if (prev === "video") {
-                    this._stashVideoWorkspace();
+                    this._stashVideoWorkspace(stashVideoKey);
                     this._clearLiveRunSelection();
                 }
                 const key = this.getTaskKey();
@@ -3664,7 +3926,7 @@ class MiniMaxH3DirectorEditor {
         } else if (prev !== "video") {
             // Leaving batch/gen/fl2v for video — stash before video restore.
             if (wasBatch) {
-                this._stashBatchWorkspace();
+                this._stashBatchWorkspace(stashBatchKey);
                 this._clearLiveRunSelection();
             }
             if (wasFl2v) {
@@ -3672,11 +3934,10 @@ class MiniMaxH3DirectorEditor {
                 this._clearLiveRunSelection();
             }
             this.timeline.timelineMode = "video";
-            // Prefer restoring the stashed v2v/rv2v session (segments + thumbs + run-select).
-            if (!this._restoreVideoWorkspace()) {
-                this.normalizeSegments();
-                this._clearLiveRunSelection();
-            }
+            this._switchToVideoTaskWorkspace(stashVideoKey, currentKey);
+        } else if (prevTaskKey && prevTaskKey !== currentKey) {
+            // v2v ↔ rv2v share director mode "video" but keep separate workspaces.
+            this._switchToVideoTaskWorkspace(prevTaskKey, currentKey);
         }
         this.timeline.timelineMode = mode;
         this._directorMode = mode;
@@ -3690,6 +3951,7 @@ class MiniMaxH3DirectorEditor {
         // t2v / i2v / r2v: never show source-video upload (fl2v keeps "上传图片").
         this.btnVideo?.classList.toggle("hidden", (hideVideoUpload && !isFl2v) || isR2v);
         this.btnVideoAppend?.classList.toggle("hidden", hideVideoUpload || isFl2v || isR2v);
+        // Playback / seek / zoom are for source-video (v2v) and fl2v preview. r2v has no source clip.
         this.controlsBar?.classList.toggle("hidden", !isFl2v && !isR2v && (hideTimeline || isBatch));
         this.boundsEl?.classList.toggle("hidden", !isFl2v && !isR2v && (hideTimeline || isBatch));
         this.timecodeEl?.classList.toggle("hidden", !isFl2v && !isR2v && (hideTimeline || isBatch));
@@ -6555,7 +6817,20 @@ class MiniMaxH3DirectorEditor {
                 && y <= TRACK_Y + TRACK_H
             ) {
                 addImageBatchGroup(this);
+            } else if (
+                this.needsSourceVideoUpload()
+                && y >= TRACK_Y
+                && y <= TRACK_Y + TRACK_H
+            ) {
+                this.pickVideoFile();
             }
+            return;
+        }
+        if (
+            this.needsSourceVideoUpload()
+            && (hit.type === "segment" || hit.type === "edge")
+        ) {
+            this.pickVideoFile();
             return;
         }
         const width = this.getLayoutWidth();
@@ -8788,7 +9063,7 @@ class MiniMaxH3DirectorEditor {
             if (prevTaskKey === "ads2v" && resolveTaskKey(value) !== "ads2v") {
                 this._stopRefVideoPreviews();
             }
-            this.applyTaskLayout(prevMode);
+            this.applyTaskLayout(prevMode, prevTaskKey);
             this.updateSegmentContinuityUI();
         } else {
             this.timeline.global[field] = value;

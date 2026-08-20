@@ -29,6 +29,8 @@ import {
     resolveTaskKey,
     roundDurationSec,
     sumFrameCounts,
+    fileForComfyUpload,
+    safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import { refreshPromptTokenEditors, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
@@ -342,6 +344,10 @@ function liveBatchSegmentFromEl(editor, el, indexAttr) {
     }
     const index = parseInt(el.getAttribute(indexAttr), 10);
     if (!Number.isFinite(index) || index < 0 || index >= segs.length) return null;
+    const cardIdx = parseInt(el.closest?.(".bd-batch-card")?.dataset?.batchIndex, 10);
+    if (Number.isFinite(cardIdx) && cardIdx >= 0 && cardIdx < segs.length) {
+        return { seg: segs[cardIdx], index: cardIdx };
+    }
     const nCards = editor.batchList?.querySelectorAll(".bd-batch-card")?.length ?? 0;
     if (nCards !== segs.length) return null;
     return { seg: segs[index], index };
@@ -586,16 +592,18 @@ const BATCH_CHUNK_SIZE = 8 * 1024 * 1024;
 const BATCH_UPLOAD_SOFT_LIMIT = 95 * 1024 * 1024;
 
 async function uploadImage(file) {
+    const uploadFile = fileForComfyUpload(file);
     const body = new FormData();
-    body.append("image", file);
+    body.append("image", uploadFile, uploadFile.name);
     body.append("type", "input");
-    body.append("overwrite", "true");
+    body.append("overwrite", "false");
     const resp = await api.fetchApi("/upload/image", { method: "POST", body });
     if (!resp.ok) throw new Error(await resp.text() || `Upload failed (${resp.status})`);
     return resp.json();
 }
 
 async function uploadChunked(file) {
+    const filename = safeUploadFilename(file?.name, file?.type);
     const uploadId = crypto.randomUUID();
     const totalChunks = Math.ceil(file.size / BATCH_CHUNK_SIZE);
     for (let i = 0; i < totalChunks; i++) {
@@ -605,8 +613,8 @@ async function uploadChunked(file) {
         body.append("upload_id", uploadId);
         body.append("chunk_index", String(i));
         body.append("total_chunks", String(totalChunks));
-        body.append("filename", file.name);
-        body.append("chunk", file.slice(start, end), `${file.name}.part`);
+        body.append("filename", filename);
+        body.append("chunk", file.slice(start, end), `${filename}.part`);
         const resp = await api.fetchApi("/minimax/director/upload_chunk", { method: "POST", body });
         if (!resp.ok) throw new Error(await resp.text() || t("upload.chunkFailed", { status: resp.status }));
         const data = await resp.json();
@@ -781,8 +789,8 @@ export function ensureImageBatchTimeline(editor) {
         }
         seg.negativePrompt = seg.negativePrompt ?? "";
         seg.genImage = seg.genImage || { imageFile: seg.imageFile || "" };
-        // Do NOT clear refs for i2v — backend ignores them, but wiping here breaks
-        // r2v → i2v → r2v (user loses uploaded reference images).
+        // Do NOT copy r2v refs into i2v/t2v here — each task keeps its own workspace.
+        // Backend ignores refs on i2v/t2v; r2v snapshots restore them on switch-back.
         seg.refs = seg.refs || [];
         seg.refAudios = seg.refAudios || seg.ref_audios || [];
         seg.refVideos = seg.refVideos || seg.ref_videos || [];
@@ -914,6 +922,7 @@ async function uploadSegSource(editor, index) {
             editor.renderImageBatchGroups();
             editor.updateOutputPreview?.();
             editor.commit(false, { syncTimeline: true });
+            editor.scheduleRender?.();
             try {
                 const dims = await readImageDimensions(file);
                 const live = (editor.timeline.segments || []).find((s) => s.id === seg.id) || seg;
@@ -1993,7 +2002,34 @@ export function renderImageBatchGroups(editor, { lightweight = false } = {}) {
     }
 
     list.innerHTML = "";
-    editor.timeline.segments.forEach((seg, index) => {
+    const ctx = { key, variant, isVideo, runningIdx, fps, externalLocked };
+    const segs = editor.timeline.segments || [];
+    if (editor.selectedIndex == null || editor.selectedIndex < 0 || editor.selectedIndex >= segs.length) {
+        editor.selectedIndex = 0;
+    }
+    for (let index = 0; index < segs.length; index++) {
+        appendBatchCard(list, editor, segs[index], index, ctx);
+    }
+    refreshPromptTokenEditors(list);
+    // 跟随片段模式：只显示选中片段对应的素材组，其余隐藏。
+    applyBatchFollowVisibility(editor);
+    // Restore the actively-edited duration input so the user can keep typing seamlessly.
+    if (focusedDurIdx >= 0) {
+        const newInput = list.querySelector(`input[data-batch-sec-index="${focusedDurIdx}"]`);
+        if (newInput) {
+            newInput.value = focusedDurRaw;
+            newInput.focus();
+            if (focusedDurSelStart >= 0) {
+                try { newInput.setSelectionRange(focusedDurSelStart, focusedDurSelEnd); } catch (_) {}
+            }
+        }
+    }
+    // Batch list is scroll-capped; refresh node/widget height after card count changes.
+    editor.updateDomWidgetHeight?.();
+}
+
+function appendBatchCard(list, editor, seg, index, ctx) {
+        const { key, variant, isVideo, runningIdx, fps, externalLocked } = ctx;
         const isR2v = key === "r2v";
         const card = document.createElement("div");
         const layoutClass = isR2v
@@ -2001,6 +2037,7 @@ export function renderImageBatchGroups(editor, { lightweight = false } = {}) {
             : (variant === "source" ? "bd-batch-source"
                 : (variant === "refs" ? "bd-batch-refs" : "bd-batch-plain"));
         card.className = `bd-batch-card ${layoutClass}`;
+        card.dataset.batchIndex = String(index);
         const runSelectOn = !!(editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.());
         const runEnabled = !runSelectOn || !!editor.isSegmentRunEnabled?.(index);
         // r2v: always show focus selected. t2v/i2v: only run-select participation chrome.
@@ -2234,23 +2271,6 @@ export function renderImageBatchGroups(editor, { lightweight = false } = {}) {
         }
 
         list.appendChild(card);
-    });
-    refreshPromptTokenEditors(list);
-    // 跟随片段模式：只显示选中片段对应的素材组，其余隐藏。
-    applyBatchFollowVisibility(editor);
-    // Restore the actively-edited duration input so the user can keep typing seamlessly.
-    if (focusedDurIdx >= 0) {
-        const newInput = list.querySelector(`input[data-batch-sec-index="${focusedDurIdx}"]`);
-        if (newInput) {
-            newInput.value = focusedDurRaw;
-            newInput.focus();
-            if (focusedDurSelStart >= 0) {
-                try { newInput.setSelectionRange(focusedDurSelStart, focusedDurSelEnd); } catch (_) {}
-            }
-        }
-    }
-    // Batch list is scroll-capped; refresh node/widget height after card count changes.
-    editor.updateDomWidgetHeight?.();
 }
 
 /**
@@ -2337,6 +2357,7 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
             }
             return;
         }
+        return;
     }
     editor.renderImageBatchGroups();
 }
