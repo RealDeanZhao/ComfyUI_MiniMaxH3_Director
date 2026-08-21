@@ -303,6 +303,7 @@ def execute_director_plan_core(
     steps: int = 25,
     sampler: str = "res_multistep",
     scheduler: str = "simple",
+    sigmas=None,
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
     clear_vram_between_segments: bool = True,
@@ -362,15 +363,27 @@ def execute_director_plan_core(
     stream_frame_counts: list[int] = []
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
 
+    # 一采自定义 sigma 表（issue #34）：接线时覆盖 steps + scheduler，未接线走 UI 下拉框。
+    first_pass_sigmas = None
+    if sigmas is not None and torch.is_tensor(sigmas) and int(sigmas.numel()) >= 2:
+        first_pass_sigmas = sigmas
+        sigma_steps = max(1, int(sigmas.numel()) - 1)
+        reports.append(
+            f"First pass: custom SIGMAS wired — {sigma_steps} steps "
+            f"(overrides steps={steps} / scheduler={scheduler})."
+        )
+    elif sigmas is not None:
+        log.warning("Custom sigmas input ignored: expected a SIGMAS tensor with >= 2 values.")
+
     refine_only = bool(getattr(plan, "refine_only", False))
     if refine_only:
         refine_pack = getattr(plan, "refine", None)
         if not (isinstance(refine_pack, dict) and refine_pack.get("enabled")):
             raise ValueError(
-                "MiniMax H3 Director: 只跑二采（不勾一采）需要连接 MiniMax H3 Director Refine "
-                "节点到 refine 口；未连接时请勾上一采。"
-                " / Refine-only requires a connected MiniMax H3 Director Refine node; "
-                "check 一采 otherwise."
+                "MiniMax H3 Director: 运行模式=只跑二采（refine_only）需要连接 MiniMax H3 "
+                "Director Refine 节点到 refine 口；未连接时请改用完整流程（full）。"
+                " / Run mode refine_only requires a connected MiniMax H3 Director Refine "
+                "node on the refine port; use the full mode otherwise."
             )
         reports.append(
             "Run mode: refine-only — 勾选段跳过一采，复用磁盘缓存 latent 直接二采。"
@@ -381,7 +394,7 @@ def execute_director_plan_core(
     if export_only:
         if not stream_export and plan.export_mode != "all":
             raise ValueError(
-                "MiniMax H3 Director: 只跑导出（export_only）+「分段导出」需要勾选「流式导出」"
+                "MiniMax H3 Director: 运行模式=只跑导出（export_only）+「分段导出」需要勾选「流式导出」"
                 "（从缓存逐段渲染 mp4）；未勾流式导出时请改用「全部导出」，或跑完整流程现采样。"
                 " / export_only with「分段导出」requires「流式导出」checked "
                 "(per-segment mp4 from cache); otherwise use「全部导出」or run the full flow."
@@ -412,13 +425,13 @@ def execute_director_plan_core(
             raise ValueError(
                 "MiniMax H3 Director: 缺少模型输入 "
                 + ", ".join(missing_models)
-                + " —— 只有「只跑导出」（一采/二采都不勾，仅选导出）可以不连模型；"
-                "请接上 UNETLoader / VAELoader / CLIPLoader，或改为只跑导出"
+                + " —— 只有「只跑导出」（export_only）模式可以不连模型；"
+                "请接上 UNETLoader / VAELoader / CLIPLoader，或把运行模式改为只跑导出"
                 "并断开这些加载节点以跳过模型加载。"
                 " / Missing model input(s): "
                 + ", ".join(missing_models)
-                + " — only export-only runs (no first pass / no refine, export checked) "
-                "can run without models; connect the loaders, or switch to export-only "
+                + " — only the export_only run mode can run without models; "
+                "connect the loaders, or switch to export_only "
                 "and disconnect them to skip model loading."
             )
     # One timestamp folder per execute so all segments of this run stay together.
@@ -965,7 +978,12 @@ def execute_director_plan_core(
                 shift_audio=shift_audio,
                 on_phase=_report_sample_phase,
                 on_step_preview=_report_step_preview if live_tae_preview else None,
-                preview_every=_live_preview_every(steps),
+                preview_every=_live_preview_every(
+                    max(1, int(first_pass_sigmas.numel()) - 1)
+                    if first_pass_sigmas is not None
+                    else steps
+                ),
+                sigmas=first_pass_sigmas,
             )
 
         first_pass_gpu = None

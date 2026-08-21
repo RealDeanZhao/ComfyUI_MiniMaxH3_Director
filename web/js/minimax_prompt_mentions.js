@@ -60,7 +60,7 @@ const MENTION_STYLES = `
   min-height:120px;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
 }
 .bd-batch-r2v .bd-batch-prompts .bd-token-editor{
-  min-height:360px;height:100%;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
+  min-height:200px;height:auto;flex:1 1 auto;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
 }
 
 .bd-token{

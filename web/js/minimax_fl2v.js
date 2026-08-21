@@ -67,12 +67,25 @@ export const FL2V_STYLES = `
 .bd-fl2v-shot-row input{width:56px}
 .bd-fl2v-detail{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:10px}
 .bd-fl2v-detail.hidden{display:none!important}
+.bd-fl2v-detail-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:0 0 auto}
+.bd-fl2v-detail-head .bd-label{margin-top:0}
 .bd-fl2v-detail .bd-label{color:#888;font-size:10px;margin-top:2px}
 .bd-fl2v-detail textarea{width:100%;min-height:64px;background:#141414;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;box-sizing:border-box;font-family:inherit;line-height:1.35}
 .bd-fl2v-detail textarea:disabled{opacity:.45;cursor:not-allowed}
 .bd-fl2v-total-wrap{display:inline-flex;align-items:center;gap:6px}
 .bd-fl2v-total-wrap.hidden{display:none!important}
 .bd-fl2v-total-wrap input:disabled{opacity:.75;cursor:default;color:#ccc}
+/* ——— 放大编辑弹窗（fl2v 镜头）：复用镜头槽位样式，仅放大 ——— */
+.bd-fl2v-expand-body{flex-direction:column;gap:12px;overflow-y:auto;padding:4px 2px}
+.bd-fl2v-expand-slots{display:grid;grid-template-columns:1fr 1fr;gap:14px;width:100%;flex:0 0 auto}
+.bd-fl2v-expand-slots .bd-fl2v-slot-wrap{min-height:0}
+.bd-fl2v-expand-slots .bd-fl2v-slot{aspect-ratio:var(--fl2v-slot-ar,16/9)}
+.bd-fl2v-expand-slots .bd-fl2v-slot img{width:100%;object-fit:contain}
+.bd-fl2v-expand-body .bd-fl2v-shot-row{font-size:13px;flex:0 0 auto}
+.bd-fl2v-expand-body .bd-fl2v-shot-row input{width:76px;font-size:13px;padding:5px 8px;background:#141414;border:1px solid #3a3a3a;border-radius:6px;color:#eee}
+.bd-fl2v-expand-prompt{display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-height:0}
+.bd-fl2v-expand-prompt .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.bd-fl2v-expand-prompt textarea{flex:1 1 auto;min-height:260px;width:100%;box-sizing:border-box;background:#101010;border:1px solid #2e2e2e;border-radius:8px;color:#eee;padding:10px;font-size:13px;line-height:1.5;font-family:inherit;resize:vertical}
 `;
 
 const DEFAULT_TOTAL = defaultFrameCount("fl2v");
@@ -708,7 +721,10 @@ export function mountFl2vPanel(parent) {
             <div class="bd-fl2v-shots" data-r="fl2v-shots"></div>
         </div>
         <div class="bd-fl2v-detail hidden" data-r="fl2v-detail">
-            <span class="bd-label" data-i18n="panel.fl2v.shotPrompt">本镜提示词</span>
+            <div class="bd-fl2v-detail-head">
+                <span class="bd-label" data-i18n="panel.fl2v.shotPrompt">本镜提示词</span>
+                <button type="button" class="bd-batch-expand" data-r="fl2v-expand" data-i18n="batch.expandEdit">放大编辑</button>
+            </div>
             <textarea data-r="fl2v-prompt" data-i18n-placeholder="placeholder.fl2vShot" placeholder=""></textarea>
             <textarea data-r="fl2v-negative" class="hidden" hidden aria-hidden="true"></textarea>
         </div>
@@ -723,6 +739,7 @@ export function mountFl2vPanel(parent) {
         workbench: wrap.querySelector('[data-r="fl2v-workbench"]'),
         shotsEl: wrap.querySelector('[data-r="fl2v-shots"]'),
         detail: wrap.querySelector('[data-r="fl2v-detail"]'),
+        expandBtn: wrap.querySelector('[data-r="fl2v-expand"]'),
         prompt: wrap.querySelector('[data-r="fl2v-prompt"]'),
         negative: wrap.querySelector('[data-r="fl2v-negative"]'),
         totalInput: null,
@@ -1217,6 +1234,162 @@ export function updateFl2vDetailUI(editor) {
     }
 }
 
+/**
+ * 放大编辑弹窗（fl2v 镜头）：首/尾帧大槽位 + 秒数 + 大提示词输入区，
+ * 槽位样式与列表内镜头卡一致，仅尺寸放大。编辑实时写入 shot 数据。
+ */
+export function openFl2vExpandModal(editor, index) {
+    const ui = editor.fl2vUi;
+    const shot = (editor.timeline.shots || [])[index];
+    if (!ui || !shot) return;
+    flushFl2vPromptDraft(editor);
+    editor._fl2vPromptSegIndex = index;
+
+    const overlay = document.createElement("div");
+    overlay.className = "bd-group-expand-overlay";
+    const modal = document.createElement("div");
+    modal.className = "bd-group-expand-modal";
+    const { width, height } = getFl2vOutputSize(editor);
+    modal.style.setProperty("--fl2v-slot-ar", `${width} / ${height}`);
+    const head = document.createElement("div");
+    head.className = "bd-group-expand-head";
+    const title = document.createElement("b");
+    title.textContent = t("fl2v.expandTitle", { n: index + 1 });
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "bd-group-expand-close";
+    closeBtn.setAttribute("data-i18n", "batch.expandClose");
+    closeBtn.textContent = t("batch.expandClose");
+    head.appendChild(title);
+    head.appendChild(closeBtn);
+    const body = document.createElement("div");
+    body.className = "bd-group-expand-body bd-fl2v-expand-body";
+    modal.appendChild(head);
+    modal.appendChild(body);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const slots = document.createElement("div");
+    slots.className = "bd-fl2v-expand-slots";
+    body.appendChild(slots);
+
+    const secRow = document.createElement("label");
+    secRow.className = "bd-fl2v-shot-row";
+    secRow.title = t("tooltip.fl2vShotDuration");
+    secRow.innerHTML = `${t("panel.fl2v.duration")} <input type="number" class="bd-num" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${shot.durationSec}"> ${t("panel.fl2v.seconds")}`;
+    body.appendChild(secRow);
+
+    const promptBox = document.createElement("div");
+    promptBox.className = "bd-fl2v-expand-prompt";
+    const promptLabel = document.createElement("span");
+    promptLabel.className = "bd-label";
+    promptLabel.textContent = t("panel.fl2v.shotPrompt");
+    const promptTa = document.createElement("textarea");
+    promptTa.placeholder = t("placeholder.fl2vShot");
+    promptTa.value = shot.prompt || "";
+    promptBox.appendChild(promptLabel);
+    promptBox.appendChild(promptTa);
+    body.appendChild(promptBox);
+
+    const renderSlots = () => {
+        const live = (editor.timeline.shots || [])[index];
+        if (!live) return;
+        const startUrl = live.startImage?.imageFile ? fl2vViewUrl(live.startImage.imageFile) : "";
+        const endUrl = live.endImage?.imageFile ? fl2vViewUrl(live.endImage.imageFile) : "";
+        slots.innerHTML = `
+            <div class="bd-fl2v-slot-wrap${startUrl ? " has-img" : ""}">
+                <div class="bd-fl2v-slot${startUrl ? " has-img" : ""}" data-slot="start" title="${t("tooltip.fl2vStartSlot")}">
+                    ${startUrl ? `<span class="tag start">${t("fl2v.tag.start")}</span>` : ""}
+                    ${startUrl ? `<img src="${startUrl}" alt="">` : `<span class="ph">${t("panel.fl2v.startRequired")}</span>`}
+                </div>
+                ${startUrl ? `<button type="button" class="x" data-clear="start" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
+            </div>
+            <div class="bd-fl2v-slot-wrap${endUrl ? " has-img" : ""}">
+                <div class="bd-fl2v-slot${endUrl ? " has-img" : ""}" data-slot="end" title="${t("tooltip.fl2vEndSlot")}">
+                    ${endUrl ? `<span class="tag end">${t("fl2v.tag.end")}</span>` : ""}
+                    ${endUrl ? `<img src="${endUrl}" alt="">` : `<span class="ph">${t("panel.fl2v.endOptional")}</span>`}
+                </div>
+                ${endUrl ? `<button type="button" class="x" data-clear="end" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
+            </div>`;
+        slots.querySelectorAll("[data-slot]").forEach((slot) => {
+            const kind = slot.dataset.slot;
+            bindFl2vSlotDnD(editor, slot, index, kind);
+            slot.addEventListener("click", (e) => {
+                if (Date.now() < (editor._fl2vIgnoreSlotClickUntil || 0)) return;
+                if (editor._fl2vSlotDrag) return;
+                e.stopPropagation();
+                editor._fl2vUploadMode = "slot";
+                editor._fl2vSlotKind = kind;
+                editor._fl2vSlotShotIndex = index;
+                if (!ui.fileInput) return;
+                ui.fileInput.multiple = false;
+                ui.fileInput.click();
+            });
+        });
+        slots.querySelectorAll("[data-clear]").forEach((btn) => {
+            btn.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                clearFl2vShotSlot(editor, index, btn.dataset.clear);
+                renderSlots();
+            });
+        });
+    };
+    renderSlots();
+    // 主面板的 fileInput change 处理器完成后，同步弹窗内槽位画面（只挂一次）。
+    if (ui.fileInput && !ui._expandSlotSync) {
+        ui._expandSlotSync = () => {
+            document.querySelectorAll(".bd-fl2v-expand-body").forEach((el) => {
+                el.dispatchEvent(new CustomEvent("bd-fl2v-expand-sync"));
+            });
+        };
+        ui.fileInput.addEventListener("change", () => setTimeout(ui._expandSlotSync, 0));
+    }
+    body.addEventListener("bd-fl2v-expand-sync", () => setTimeout(renderSlots, 0));
+
+    const secInput = secRow.querySelector("input");
+    secInput.addEventListener("click", (e) => e.stopPropagation());
+    secInput.addEventListener("keydown", (e) => e.stopPropagation());
+    const applySec = () => {
+        setFl2vShotDurationSec(editor, index, secInput.value);
+        editor.commit?.(false, { syncTimeline: true });
+        editor.updateVideoNameLabel?.();
+        editor.scheduleRender?.();
+        editor.updateDomWidgetHeight?.();
+    };
+    secInput.addEventListener("change", applySec);
+
+    promptTa.addEventListener("input", () => {
+        const live = (editor.timeline.shots || [])[index];
+        if (!live) return;
+        live.prompt = promptTa.value || "";
+        if (ui.prompt && ui.prompt !== document.activeElement) ui.prompt.value = live.prompt;
+        editor.scheduleRender?.();
+    });
+
+    let closed = false;
+    const close = () => {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener("keydown", onKey);
+        const live = (editor.timeline.shots || [])[index];
+        if (live) live.prompt = promptTa.value || "";
+        overlay.remove();
+        editor.commit?.(false, { syncTimeline: true });
+        updateFl2vDetailUI(editor);
+        editor.scheduleRender?.();
+    };
+    const onKey = (e) => {
+        if (e.key === "Escape") close();
+    };
+    closeBtn.onclick = close;
+    overlay.onclick = (e) => {
+        if (e.target === overlay) close();
+    };
+    document.addEventListener("keydown", onKey);
+    setTimeout(() => promptTa.focus(), 0);
+}
+
 export function bindFl2vEvents(editor) {
     const ui = editor.fl2vUi;
     if (!ui) return;
@@ -1255,6 +1428,27 @@ export function bindFl2vEvents(editor) {
     };
     bindPromptField(ui.prompt, "prompt");
     bindPromptField(ui.negative, "negativePrompt");
+
+    // 放大编辑：在大弹窗中编辑当前镜头（槽位 + 秒数 + 提示词）。
+    ui.expandBtn?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = Number.isFinite(editor._fl2vPromptSegIndex)
+            ? editor._fl2vPromptSegIndex
+            : editor.selectedIndex;
+        openFl2vExpandModal(editor, idx);
+    });
+
+    // 手动拖大提示词框时同步节点高度，避免内容溢出压到下方预览组件。
+    if (ui.detail && typeof ResizeObserver !== "undefined" && !ui._detailResizeObserver) {
+        let lastH = 0;
+        ui._detailResizeObserver = new ResizeObserver(() => {
+            const h = ui.detail.offsetHeight || 0;
+            if (Math.abs(h - lastH) < 2) return;
+            lastH = h;
+            editor.updateDomWidgetHeight?.();
+        });
+        ui._detailResizeObserver.observe(ui.detail);
+    }
 
     ui.fileInput?.addEventListener("change", async () => {
         const files = [...(ui.fileInput.files || [])];

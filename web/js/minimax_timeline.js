@@ -410,8 +410,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
     seed: "widget.seed",
     clear_vram_between_segments: "widget.clearVram",
     export_source_images: "widget.exportSourceImages",
-    run_first_pass: "widget.runFirstPass",
-    run_refine: "widget.runRefine",
+    run_mode: "widget.runMode",
     run_stream_export: "widget.streamExport",
     run_normal_export: "widget.normalExport",
     control_after_generate: "widget.controlAfterGenerate",
@@ -421,8 +420,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
 const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
     clear_vram_between_segments: "widget.tooltip.clearVram",
     export_source_images: "widget.tooltip.exportSourceImages",
-    run_first_pass: "widget.tooltip.runFirstPass",
-    run_refine: "widget.tooltip.runRefine",
+    run_mode: "widget.tooltip.runMode",
     run_stream_export: "widget.tooltip.streamExport",
     run_normal_export: "widget.tooltip.normalExport",
 };
@@ -453,8 +451,39 @@ function bindRunPlanExclusiveExport(node) {
     }
 }
 
+// 运行模式=只跑二采（refine_only）但未接 Refine：标签标 ⚠ 提醒（排队后后端仍会兜底报错）。
+function syncRunModeRefineWarning(node) {
+    const mode = node.widgets?.find((w) => w.name === "run_mode");
+    if (!mode) return;
+    const refineLinked = (node.inputs || []).some((i) => i.name === "refine" && i.link != null);
+    const warn = mode.value === "refine_only" && !refineLinked;
+    const label = t("widget.runMode") + (warn ? " ⚠" : "");
+    if (mode.label !== label) {
+        mode.label = label;
+        node.setDirtyCanvas?.(true, false);
+    }
+    if (mode.options) {
+        mode.options.label = label;
+        mode.options.tooltip = t(warn ? "widget.tooltip.runModeRefineMissing" : "widget.tooltip.runMode");
+    }
+}
+
+function bindRunModeRefineWarning(node) {
+    const mode = node.widgets?.find((w) => w.name === "run_mode");
+    if (!mode || mode._mmxRunModeWarnPatched) return;
+    mode._mmxRunModeWarnPatched = true;
+    const prev = mode.callback;
+    mode.callback = function (...cbArgs) {
+        const out = prev?.apply(this, cbArgs);
+        queueMicrotask(() => syncRunModeRefineWarning(node));
+        return out;
+    };
+}
+
 function applyDirectorWidgetLabels(node) {
     bindRunPlanExclusiveExport(node);
+    bindRunModeRefineWarning(node);
+    syncRunModeRefineWarning(node);
     for (const w of node.widgets || []) {
         const name = String(w.name || "");
         const key = DIRECTOR_WIDGET_LABEL_KEYS[name]
@@ -577,17 +606,12 @@ const STYLES = `
 /* Solo material group (class set by syncBatchPanelFillHeight): card fills the list. */
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card{flex:1 1 auto;min-height:0;align-self:stretch}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v{display:flex;flex-direction:column}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{flex:1 1 auto;min-height:280px;max-height:100%;align-self:stretch}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{flex:1 1 auto;min-height:0;height:auto;max-height:100%}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{flex:1 1 auto;min-height:0;max-height:100%;overflow:hidden}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{flex:1 1 auto;min-height:280px;align-self:stretch}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{flex:1 1 auto;min-height:0}
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{flex:1 1 auto;min-height:160px}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{
-  flex:1 1 auto;min-height:200px;max-height:100%;height:auto!important;overflow:auto
-}
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-token-wrap,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-token-editor,
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v .bd-batch-prompts textarea{
-  max-height:100%
+  flex:1 1 auto;min-height:120px;overflow:auto
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source,
@@ -1185,7 +1209,7 @@ function moveDirectorDomWidgetToEnd(node) {
     node.widgets.push(widget);
 }
 
-const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "export_source_images", "run_first_pass", "run_refine", "run_stream_export", "run_normal_export"];
+const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "export_source_images", "run_mode", "run_stream_export", "run_normal_export"];
 
 function moveDirectorPerfWidgetsBeforeTimeline(node) {
     const dom = node?._minimaxDomWidget;
@@ -10428,6 +10452,7 @@ app.registerExtension({
         nodeType.prototype.onConnectionsChange = function (...args) {
             const out = onConnectionsChange?.apply(this, args);
             this._minimaxEditor?.syncExternalGroupsTimeline?.();
+            syncRunModeRefineWarning(this);
             return out;
         };
 
@@ -10449,6 +10474,7 @@ app.registerExtension({
             normalizeDirectorOutputs(this);
             const out = onConfigure?.apply(this, arguments);
             setTimeout(() => {
+                syncRunModeRefineWarning(this);
                 finalizeDirectorWidgetOrder(this);
                 const ed = initDirectorEditor(this) || this._minimaxEditor;
                 if (!ed) return;

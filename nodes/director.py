@@ -107,6 +107,18 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
+                "sigmas": (
+                    "SIGMAS",
+                    {
+                        "tooltip": (
+                            "可选。接入 BasicScheduler / ManualSigmas 的 SIGMAS 输出，覆盖一采的 steps + scheduler "
+                            "（issue #34 自定义 sigma 表，可解决像素化问题）。"
+                            "未接线时使用上方 scheduler 下拉框（默认行为不变）。"
+                            "接线时 BasicScheduler 请接 SigmaShift 之后的 MODEL（与官方模板一致）；"
+                            "实际步数 = sigma 数量 - 1，Refine 二采仍走 Refine 自己的 sigmas 口。"
+                        ),
+                    },
+                ),
                 "bd_grp_advanced": ("BDGROUP", {"default": "高级采样"}),
                 "steps": (
                     "INT",
@@ -152,6 +164,7 @@ class MiniMaxH3Director:
                 "video_vae": "VAE",
                 "audio_vae": "VAE",
                 "clip": "CLIP",
+                "sigmas": "SIGMAS",
             }
             for name, want in expected.items():
                 got = input_types.get(name)
@@ -188,6 +201,7 @@ class MiniMaxH3Director:
         i2v_groups=None,
         r2v_groups=None,
         refine=None,
+        sigmas=None,
         steps=25,
         sampler="res_multistep",
         scheduler="simple",
@@ -197,8 +211,7 @@ class MiniMaxH3Director:
         shift_audio=3.0,
         clear_vram_between_segments="unload_models",
         export_source_images=False,
-        run_first_pass=True,
-        run_refine=True,
+        run_mode="full",
         run_stream_export=False,
         run_normal_export=True,
         model=None,
@@ -223,8 +236,14 @@ class MiniMaxH3Director:
             r2v_groups=r2v_groups,
             refine=refine,
         )
-        plan.refine_only = (not bool(run_first_pass)) and bool(run_refine)
-        plan.export_only = (not bool(run_first_pass)) and (not bool(run_refine))
+        if run_mode not in ("full", "refine_only", "export_only"):
+            raise ValueError(
+                "MiniMax H3 Director: 未知运行模式 "
+                f"{run_mode!r}（可选 full / refine_only / export_only）。"
+                f" / Unknown run mode {run_mode!r} (expected full / refine_only / export_only)."
+            )
+        plan.refine_only = run_mode == "refine_only"
+        plan.export_only = run_mode == "export_only"
 
         if bool(run_stream_export) and bool(run_normal_export):
             raise ValueError(
@@ -251,6 +270,7 @@ class MiniMaxH3Director:
                 steps=steps,
                 sampler=sampler,
                 scheduler=scheduler,
+                sigmas=sigmas,
                 shift_video=shift_video,
                 shift_audio=shift_audio,
                 clear_vram_between_segments=clear_vram_between_segments,

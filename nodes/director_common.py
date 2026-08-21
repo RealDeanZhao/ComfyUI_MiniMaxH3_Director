@@ -100,29 +100,20 @@ def director_perf_inputs() -> dict:
                 "tooltip": "输出 source_images（时间轴原片帧对比）。默认关以节省内存。",
             },
         ),
-        "run_first_pass": (
-            "BOOLEAN",
+        "run_mode": (
+            ["full", "refine_only", "export_only"],
             {
-                "default": True,
+                "default": "full",
                 "tooltip": (
-                    "一采：正常首次采样（每段必跑或已有缓存）。"
-                    "勾选=本段先做一采再走后续流程；不勾选（仅勾二采/导出）= 复用上次缓存。"
-                    " / First pass: normal sampling. Checked = sample then continue; "
-                    "unchecked (refine/export only) = reuse cached AV latent."
-                ),
-            },
-        ),
-        "run_refine": (
-            "BOOLEAN",
-            {
-                "default": True,
-                "tooltip": (
-                    "二采：在一采基础上做第二次采样/放大精修。需连接 MiniMax H3 Director Refine "
-                    "节点；不勾选则即使接了 Refine 也不跑二采。只勾「二采」（不勾一采）即只跑二采，"
-                    "复用磁盘缓存 latent（需先完整跑过一次）。"
-                    " / Second pass: refine / upscale after the first pass. Requires a connected "
-                    "Refine node; unchecked = no refine even if Refine is wired. Checking only "
-                    "「二采」= refine-only (reuses cached AV latent; requires a prior full run)."
+                    "运行模式：full=完整流程（采样一采；接了 Refine 节点就自动二采，未接则只出一采）；"
+                    "refine_only=只跑二采（跳过一采采样，复用磁盘缓存 latent 直接精修，"
+                    "需连接 Refine 且先完整跑过一次）；"
+                    "export_only=只跑导出（不采样不二采，仅从分段缓存渲染成片，可断开模型加载节点省显存）。"
+                    " / Run mode: full=full flow (first-pass sampling; refine runs automatically "
+                    "only when a Refine node is wired); refine_only=skip sampling and refine the "
+                    "cached AV latent (requires a wired Refine node and a prior full run); "
+                    "export_only=render the final video from segment caches only (model loaders "
+                    "may stay disconnected)."
                 ),
             },
         ),

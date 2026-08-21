@@ -555,8 +555,24 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-prompts textarea{background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;font-family:inherit;line-height:1.35}
 .bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea,
 .bd-batch-plain .bd-batch-prompts .bd-token-wrap,.bd-batch-source .bd-batch-prompts .bd-token-wrap{min-height:120px;height:100%;resize:vertical;overflow:auto}
-.bd-batch-r2v .bd-batch-prompts textarea,.bd-batch-r2v .bd-batch-prompts .bd-token-wrap{min-height:360px;height:100%;flex:1;resize:vertical;overflow:auto}
+.bd-batch-r2v .bd-batch-prompts textarea,.bd-batch-r2v .bd-batch-prompts .bd-token-wrap{width:100%;min-height:200px;flex:1 1 auto;resize:vertical;overflow:auto}
 .bd-batch-r2v .bd-batch-prompts textarea{background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
+.bd-batch-prompts-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:0 0 auto}
+.bd-batch-expand{background:#1c2836;border:1px solid #3a5a7a;color:#9cc8ff;border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer;line-height:1.4;flex:0 0 auto;transition:border-color .15s,background .15s}
+.bd-batch-expand:hover{border-color:#6a9aca;background:#243248;color:#c8e2ff}
+/* ——— 放大编辑弹窗：复用素材组卡片布局，仅放大 ——— */
+.bd-group-expand-overlay{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+.bd-group-expand-modal{background:#161616;border:1px solid #333;border-radius:14px;box-shadow:0 18px 48px rgba(0,0,0,.6);display:flex;flex-direction:column;gap:10px;width:min(1500px,96vw);height:min(94vh,1040px);padding:14px 16px;box-sizing:border-box}
+.bd-group-expand-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-shrink:0}
+.bd-group-expand-head b{color:#f0f0f0;font-size:14px;font-weight:650}
+.bd-group-expand-close{background:#243040;border:1px solid #4a6a8a;color:#d8e6f5;border-radius:8px;padding:6px 16px;font-size:12px;cursor:pointer}
+.bd-group-expand-close:hover{border-color:#6a9aca;background:#2c3c50}
+.bd-group-expand-body{flex:1 1 auto;min-height:0;display:flex;overflow:hidden}
+.bd-group-expand-body>.bd-batch-card{flex:1 1 auto;min-height:0;align-self:stretch;overflow-y:auto}
+.bd-group-expand-body .bd-batch-r2v-body{flex:1 1 auto;min-height:0}
+.bd-group-expand-body .bd-batch-r2v-main{min-height:0}
+.bd-group-expand-body .bd-batch-prompts{min-height:0}
+.bd-group-expand-body .bd-batch-prompts textarea,.bd-group-expand-body .bd-batch-prompts .bd-token-editor{font-size:13px}
 .bd-batch-preview{background:#0d0d0d;border:1px solid #333;border-radius:4px;min-height:100px;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;color:#555;font-size:10px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{width:100%;max-width:220px;min-height:160px;justify-self:end}
 .bd-batch-r2v .bd-batch-preview{min-height:220px;flex:0 0 auto;height:auto;border-radius:10px;border-color:#262626;background:#0c0c0c;padding:8px;font-size:11px;color:#666}
@@ -2028,6 +2044,73 @@ export function renderImageBatchGroups(editor, { lightweight = false } = {}) {
     editor.updateDomWidgetHeight?.();
 }
 
+/**
+ * 放大编辑弹窗：复用 appendBatchCard 渲染整张素材组卡片（布局与列表内一致），
+ * 放入大尺寸弹层方便编辑长提示词。关闭时同步草稿并重绘列表卡片。
+ */
+function openGroupExpandModal(editor, index) {
+    const segs = editor.timeline.segments || [];
+    const seg = segs[index];
+    if (!seg) return;
+    flushBatchPromptInputs(editor);
+    const key = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
+    const ctx = {
+        key,
+        variant: imageBatchVariant(key),
+        isVideo: isVideoBatchTask(key),
+        runningIdx: editor._runHighlightSeg,
+        fps: parseFloat(editor.frameRateWidget?.value || editor.timeline?.frameRate || 24),
+        externalLocked: !!(editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.()),
+    };
+    const overlay = document.createElement("div");
+    overlay.className = "bd-group-expand-overlay";
+    const modal = document.createElement("div");
+    modal.className = "bd-group-expand-modal";
+    const head = document.createElement("div");
+    head.className = "bd-group-expand-head";
+    const title = document.createElement("b");
+    title.textContent = t("batch.expandTitle", { n: index + 1 });
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "bd-group-expand-close";
+    closeBtn.setAttribute("data-i18n", "batch.expandClose");
+    closeBtn.textContent = t("batch.expandClose");
+    head.appendChild(title);
+    head.appendChild(closeBtn);
+    const body = document.createElement("div");
+    body.className = "bd-group-expand-body";
+    modal.appendChild(head);
+    modal.appendChild(body);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    appendBatchCard(body, editor, seg, index, ctx);
+    refreshPromptTokenEditors(body);
+
+    let closed = false;
+    const close = () => {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener("keydown", onKey);
+        body.querySelectorAll("textarea[data-batch-prompt-index]").forEach((el) => {
+            el.__bdTokenApi?.sync?.();
+        });
+        stopAllPlayers(body);
+        overlay.remove();
+        editor.scheduleTimelineSync?.();
+        editor.commit?.(false, { syncTimeline: true });
+        renderImageBatchGroups(editor);
+    };
+    const onKey = (e) => {
+        if (e.key === "Escape") close();
+    };
+    closeBtn.onclick = close;
+    overlay.onclick = (e) => {
+        if (e.target === overlay) close();
+    };
+    document.addEventListener("keydown", onKey);
+}
+
 function appendBatchCard(list, editor, seg, index, ctx) {
         const { key, variant, isVideo, runningIdx, fps, externalLocked } = ctx;
         const isR2v = key === "r2v";
@@ -2219,11 +2302,33 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         const prompts = document.createElement("div");
         prompts.className = "bd-batch-prompts";
         const ph = t(isR2v ? "placeholder.batchR2v" : "placeholder.batchDefault");
-        prompts.innerHTML = `
-            <span class="bd-label">${t("batch.prompt")}</span>
-            <textarea data-f="prompt" data-batch-prompt-index="${index}" data-batch-seg-id="${seg.id || ""}" placeholder=""></textarea>`;
-        prompts.querySelector("textarea").placeholder = ph;
-        prompts.querySelector("textarea").value = seg.prompt || "";
+        const promptsHead = document.createElement("div");
+        promptsHead.className = "bd-batch-prompts-head";
+        const label = document.createElement("span");
+        label.className = "bd-label";
+        label.textContent = t("batch.prompt");
+        promptsHead.appendChild(label);
+        if (isR2v && !externalLocked) {
+            const expand = document.createElement("button");
+            expand.type = "button";
+            expand.className = "bd-batch-expand";
+            expand.setAttribute("data-i18n", "batch.expandEdit");
+            expand.textContent = t("batch.expandEdit");
+            expand.title = t("batch.expandTooltip");
+            expand.onclick = (e) => {
+                e.stopPropagation();
+                openGroupExpandModal(editor, index);
+            };
+            promptsHead.appendChild(expand);
+        }
+        prompts.appendChild(promptsHead);
+        const promptTa = document.createElement("textarea");
+        promptTa.setAttribute("data-f", "prompt");
+        promptTa.setAttribute("data-batch-prompt-index", String(index));
+        promptTa.setAttribute("data-batch-seg-id", seg.id || "");
+        promptTa.placeholder = ph;
+        promptTa.value = seg.prompt || "";
+        prompts.appendChild(promptTa);
         const promptEl = prompts.querySelector('[data-f="prompt"]');
         const segIndex = index;
         const segId = seg.id;
