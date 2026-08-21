@@ -411,8 +411,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
     clear_vram_between_segments: "widget.clearVram",
     export_source_images: "widget.exportSourceImages",
     run_mode: "widget.runMode",
-    run_stream_export: "widget.streamExport",
-    run_normal_export: "widget.normalExport",
+    export_type: "widget.exportType",
     control_after_generate: "widget.controlAfterGenerate",
     "control after generate": "widget.controlAfterGenerate",
 };
@@ -421,8 +420,7 @@ const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
     clear_vram_between_segments: "widget.tooltip.clearVram",
     export_source_images: "widget.tooltip.exportSourceImages",
     run_mode: "widget.tooltip.runMode",
-    run_stream_export: "widget.tooltip.streamExport",
-    run_normal_export: "widget.tooltip.normalExport",
+    export_type: "widget.tooltip.exportType",
 };
 
 const DIRECTOR_GROUP_LABEL_KEYS = {
@@ -430,26 +428,6 @@ const DIRECTOR_GROUP_LABEL_KEYS = {
     bd_grp_advanced: "widget.grpAdvanced",
     bd_grp_perf: "widget.grpPerf",
 };
-
-// 流式导出 / 正常导出 互斥：勾选其一自动取消另一个（后端另有兜底校验）。
-function bindRunPlanExclusiveExport(node) {
-    const stream = node.widgets?.find((w) => w.name === "run_stream_export");
-    const normal = node.widgets?.find((w) => w.name === "run_normal_export");
-    if (!stream || !normal) return;
-    for (const [w, other] of [[stream, normal], [normal, stream]]) {
-        if (w._mmxRunPlanExclusivePatched) continue;
-        w._mmxRunPlanExclusivePatched = true;
-        const prev = w.callback;
-        w.callback = function (...cbArgs) {
-            const out = prev?.apply(this, cbArgs);
-            if (cbArgs[0] && other.value) {
-                other.value = false;
-                if (other.callback) other.callback.call(other, false);
-            }
-            return out;
-        };
-    }
-}
 
 // 运行模式=只跑二采（refine_only）但未接 Refine：标签标 ⚠ 提醒（排队后后端仍会兜底报错）。
 function syncRunModeRefineWarning(node) {
@@ -481,7 +459,6 @@ function bindRunModeRefineWarning(node) {
 }
 
 function applyDirectorWidgetLabels(node) {
-    bindRunPlanExclusiveExport(node);
     bindRunModeRefineWarning(node);
     syncRunModeRefineWarning(node);
     for (const w of node.widgets || []) {
@@ -1209,7 +1186,7 @@ function moveDirectorDomWidgetToEnd(node) {
     node.widgets.push(widget);
 }
 
-const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "export_source_images", "run_mode", "run_stream_export", "run_normal_export"];
+const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "export_source_images", "run_mode", "export_type"];
 
 function moveDirectorPerfWidgetsBeforeTimeline(node) {
     const dom = node?._minimaxDomWidget;

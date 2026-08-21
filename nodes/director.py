@@ -212,8 +212,7 @@ class MiniMaxH3Director:
         clear_vram_between_segments="unload_models",
         export_source_images=False,
         run_mode="full",
-        run_stream_export=False,
-        run_normal_export=True,
+        export_type="常规导出",
         model=None,
         video_vae=None,
         audio_vae=None,
@@ -245,17 +244,13 @@ class MiniMaxH3Director:
         plan.refine_only = run_mode == "refine_only"
         plan.export_only = run_mode == "export_only"
 
-        if bool(run_stream_export) and bool(run_normal_export):
+        if export_type not in ("常规导出", "流式导出", "normal", "stream"):
             raise ValueError(
-                "MiniMax H3 Director: 「流式导出」与「正常导出」互斥，不能同时勾选；"
-                "请只保留其一。"
-                " / Stream export and normal export are mutually exclusive; keep only one."
+                "MiniMax H3 Director: 未知导出方式 "
+                f"{export_type!r}（可选 常规导出 / 流式导出）。"
+                f" / Unknown export type {export_type!r} (expected 常规导出 / 流式导出)."
             )
-        if not bool(run_stream_export) and not bool(run_normal_export):
-            log.warning("Neither export checked — defaulting to normal export.")
-            run_normal_export = True
-
-        stream_export = bool(run_stream_export)
+        stream_export = export_type in ("流式导出", "stream")
 
         combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, video_path = (
             execute_director_plan_core(

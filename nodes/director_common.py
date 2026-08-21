@@ -117,36 +117,24 @@ def director_perf_inputs() -> dict:
                 ),
             },
         ),
-        "run_stream_export": (
-            "BOOLEAN",
+        "export_type": (
+            ["常规导出", "流式导出"],
             {
-                "default": False,
+                "default": "常规导出",
                 "tooltip": (
-                    "流式导出（防 OOM）：从分段缓存流式渲染成片并写 mp4 文件，成片已含音轨"
-                    "（视频+音频），峰值内存恒定（≈6GB），长片「全部导出」全量拼接 OOM 时开启。"
+                    "导出方式：常规导出=内存拼接输出 images/audio（连接 CreateVideo 使用）；"
+                    "流式导出（防 OOM）=从分段缓存流式渲染成片并写 mp4 文件，成片已含音轨"
+                    "（视频+音频），峰值内存恒定（≈6GB），长片「全部导出」全量拼接 OOM 时选用。"
                     "「全部导出」= 整片合并成一个 mp4；「分段导出」= 每段渲染成独立 mp4"
                     "（输出目录见 video_path，同样低内存）。"
-                    "开启后节点 images/audio 输出端口为空（无需连接 CreateVideo），"
-                    "成片路径见 video_path 输出。与「正常导出」互斥，不能同时勾选。"
-                    " / Stream export (OOM-safe): render the final video (video+audio muxed "
-                    "into the mp4) from segment caches with bounded memory (~6GB); enable "
-                    "when the full export OOMs on long projects. 「全部导出」= one merged mp4; "
-                    "「分段导出」= one independent mp4 per segment (dir path in video_path). "
-                    "The node's images/audio output ports are empty (no CreateVideo needed); "
-                    "the mp4 path is in video_path. Mutually exclusive with「正常导出」."
-                ),
-            },
-        ),
-        "run_normal_export": (
-            "BOOLEAN",
-            {
-                "default": True,
-                "tooltip": (
-                    "正常导出：内存拼接输出 images/audio（连接 CreateVideo 使用）。"
-                    "与「流式导出」互斥。若两者都不勾选，默认按正常导出处理。"
-                    " / Normal export: concat in memory, output images/audio (for CreateVideo). "
-                    "Mutually exclusive with「流式导出」. If neither export is checked, "
-                    "defaults to normal export."
+                    "流式导出下节点 images/audio 输出端口为空（无需连接 CreateVideo），"
+                    "成片路径见 video_path 输出。"
+                    " / Export type: normal = concat in memory, output images/audio (for CreateVideo); "
+                    "stream (OOM-safe) = render the final video (video+audio muxed into the mp4) "
+                    "from segment caches with bounded memory (~6GB); enable when the full export "
+                    "OOMs on long projects. 「全部导出」= one merged mp4; 「分段导出」= one independent "
+                    "mp4 per segment (dir path in video_path). The node's images/audio output ports "
+                    "are empty in stream mode (no CreateVideo needed); the mp4 path is in video_path."
                 ),
             },
         ),

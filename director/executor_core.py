@@ -394,9 +394,9 @@ def execute_director_plan_core(
     if export_only:
         if not stream_export and plan.export_mode != "all":
             raise ValueError(
-                "MiniMax H3 Director: 运行模式=只跑导出（export_only）+「分段导出」需要勾选「流式导出」"
-                "（从缓存逐段渲染 mp4）；未勾流式导出时请改用「全部导出」，或跑完整流程现采样。"
-                " / export_only with「分段导出」requires「流式导出」checked "
+                "MiniMax H3 Director: 运行模式=只跑导出（export_only）+「分段导出」需要把导出方式设为「流式导出」"
+                "（从缓存逐段渲染 mp4）；未选流式导出时请改用「全部导出」，或跑完整流程现采样。"
+                " / export_only with「分段导出」requires export type「流式导出」(stream) "
                 "(per-segment mp4 from cache); otherwise use「全部导出」or run the full flow."
             )
         # 等同「选择运行」全不选：不采样、不二采，仅从缓存渲染成片。
