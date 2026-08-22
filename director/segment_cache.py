@@ -169,7 +169,9 @@ def save_segment_cache(
     handoff_path = root / f"seg_{idx:04d}.handoff.json"
     audio_path = root / f"seg_{idx:04d}.audio.pt"
     try:
-        payload = tensor.cpu().float().contiguous()
+        # fp16 on disk: frames are 0..1 display values; halves cache size + IO.
+        # Loads cast back to fp32 so downstream math matches legacy fp32 caches.
+        payload = tensor.detach().cpu().to(torch.float16).contiguous()
         _write_via_temp(pt_path, lambda p: torch.save(payload, p))
         text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
         _write_via_temp(
@@ -387,7 +389,7 @@ def load_segment_cache(
                 "Segment %d: using cache without meta for export fill.",
                 idx + 1,
             )
-        return torch.load(tensor_path, map_location="cpu", weights_only=True)
+        return torch.load(tensor_path, map_location="cpu", weights_only=True).float()
     except Exception as exc:
         log.warning("Failed to load segment %d cache: %s", idx + 1, exc)
         return None

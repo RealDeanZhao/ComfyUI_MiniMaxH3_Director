@@ -42,7 +42,9 @@ LATENTS_STD = [
     3.276226282119751, 3.1627357006073, 2.2816812992095947, 2.6127843856811523,
 ]
 
-_MODEL_CACHE: dict[str, nn.Module] = {}
+# fp16 state-dict cache: ~half the resident RAM of a fp32 module, and unlike a
+# cached nn.Module it is never mutated by callers moving it between devices.
+_SD_CACHE: dict[str, dict] = {}
 
 
 def ensure_latent_upscale_folder() -> str | None:
@@ -291,30 +293,32 @@ def _resolve_model_path(name: str) -> str:
 
 
 def load_h3_latent_upscaler(name: str, device: torch.device, dtype: torch.dtype) -> nn.Module:
-    cache_key = f"{name}::{dtype}"
-    cached = _MODEL_CACHE.get(cache_key)
-    if cached is not None:
-        return cached.to(device=device, dtype=dtype)
-    path = _resolve_model_path(name)
-    raw = _load_raw_sd(path)
-    sd = _extract_upscaler_sd(raw)
-    if "resizer.conv_in.weight" in sd and "conv_in.weight" not in sd:
-        raise ValueError(
-            f"{name} looks like the 2D checkpoint. Director uses the 3D weights "
-            "(minimax_h3_latent_upscaler_3d_*.safetensors)."
-        )
+    sd = _SD_CACHE.get(name)
+    if sd is None:
+        path = _resolve_model_path(name)
+        raw = _load_raw_sd(path)
+        sd = _extract_upscaler_sd(raw)
+        if "resizer.conv_in.weight" in sd and "conv_in.weight" not in sd:
+            raise ValueError(
+                f"{name} looks like the 2D checkpoint. Director uses the 3D weights "
+                "(minimax_h3_latent_upscaler_3d_*.safetensors)."
+            )
+        # Cache fp16 on CPU; load_state_dict casts back to the requested dtype.
+        sd = {
+            k: (v.to(torch.float16) if v.is_floating_point() else v)
+            for k, v in sd.items()
+        }
+        _SD_CACHE[name] = sd
     cfg = _detect_arch(sd)
     model = LatentResizer3D(**cfg)
     model.load_state_dict(sd, strict=True)
-    model = model.to(device="cpu", dtype=dtype).eval()
-    _MODEL_CACHE[cache_key] = model
     log.info(
         "H3 latent upscaler loaded: %s (params=%s, C=%d)",
         name,
         f"{sum(p.numel() for p in model.parameters()):,}",
         cfg["in_channels"],
     )
-    return model.to(device=device, dtype=dtype)
+    return model.to(device=device, dtype=dtype).eval()
 
 
 def _as_bcthw(samples: torch.Tensor) -> tuple[torch.Tensor, str]:

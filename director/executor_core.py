@@ -866,6 +866,8 @@ def execute_director_plan_core(
                                 f"Segment {prev_idx + 1}: {mp4_export_kind(mp4_path)} "
                                 f"updated after continuity trim → {mp4_path}"
                             )
+                        # Rewrite is a one-shot per segment — free pass frames now.
+                        completed_refine_passes.pop(prev_idx, None)
                     trimmed_prev_export = int(prev_export_trim)
                     log.info(
                         "Director continuity: trimmed %df from seg #%d export "
@@ -1049,7 +1051,11 @@ def execute_director_plan_core(
                     audio_p if isinstance(audio_p, dict) else None,
                     suffix=suffix,
                 )
-                pass_clips.append((suffix, frames_p))
+                # Only continuity phase-align trim ever re-reads these frames
+                # (to rewrite prev mp4s) — don't pin full-length tensors in RAM
+                # when continuity is off; mp4 files are the persistent record.
+                if plan.continuity_enabled:
+                    pass_clips.append((suffix, frames_p))
                 if path:
                     reports.append(
                         f"Segment {ui_idx + 1}/{timeline_seg_total}: "
@@ -1149,6 +1155,10 @@ def execute_director_plan_core(
         completed_outputs[seg.index] = chunk
         completed_pre_refine[seg.index] = pre_chunk
         completed_refine_passes[seg.index] = pass_clips
+        # Pass frames are only read for the immediately-previous segment; drop older.
+        _prune_completed_tensors(
+            completed_refine_passes, keep=seg.index, label="refine pass frames"
+        )
 
         #「分段导出」: flush mp4 as soon as this segment succeeds (crash-safe).
         # Final clip = last refine pass; _pre = 一采; _pN = each refine round.
@@ -1229,8 +1239,7 @@ def execute_director_plan_core(
 
     for seg in all_segments:
         if seg.index in run_indices:
-            if vram_clean_on and segment_outputs:
-                cleanup_segment_vram(enabled=True, unload_models=vram_unload_models)
+            # _run_one_segment already cleans VRAM on exit — no extra sweep here.
             chunk, audio_dict, pre_chunk = _run_one_segment(
                 seg, progress_index=progress_pos[seg.index]
             )

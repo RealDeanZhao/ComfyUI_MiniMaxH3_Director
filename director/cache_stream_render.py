@@ -97,8 +97,9 @@ class _FrameWriter:
 
     def write(self, frames: torch.Tensor) -> None:
         for f in range(int(frames.shape[0])):
-            self.proc.stdin.write(
-                frames[f].mul_(255.0).clamp_(0.0, 255.0).to(torch.uint8).numpy().tobytes())
+            # Non-mutating: callers may reuse these frames (e.g. cached tensors).
+            frame = frames[f].mul(255.0).clamp_(0.0, 255.0).to(torch.uint8)
+            self.proc.stdin.write(frame.numpy().tobytes())
         self.total += int(frames.shape[0])
 
     def close(self) -> int:
@@ -165,7 +166,7 @@ def render_segments_from_cache(
     counts: list[int] = []
     for f in files:
         base = os.path.splitext(os.path.basename(f))[0]
-        frames = torch.load(f, map_location="cpu")
+        frames = torch.load(f, map_location="cpu").float()
         H, W = int(frames.shape[1]), int(frames.shape[2])
         mp4 = os.path.join(out_dir, base + ".mp4")
         raw = mp4 + ".raw.mp4"
@@ -212,7 +213,7 @@ def stream_render_from_cache(
     if not files:
         raise RuntimeError(f"MiniMax H3 cache render: no seg_XXXX.pt in {cache_dir}")
 
-    first = torch.load(files[0], map_location="cpu")
+    first = torch.load(files[0], map_location="cpu").float()
     H, W = int(first.shape[1]), int(first.shape[2])
     total = int(first.shape[0])
 
@@ -225,7 +226,7 @@ def stream_render_from_cache(
             cur = _unfreeze_held_tail(first)
             del first
             for i in range(1, len(files)):
-                body = torch.load(files[i], map_location="cpu")
+                body = torch.load(files[i], map_location="cpu").float()
                 total += int(body.shape[0])
                 left = cur
                 if CONTINUITY_HOLD_POP_ON_TAIL:
