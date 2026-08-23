@@ -60,6 +60,68 @@ import logging
 
 _log = logging.getLogger("ComfyUI-MiniMaxH3-Director")
 
+# ── 内存看门狗 ────────────────────────────────────────────────────────────
+# 后台线程周期采样 RSS / cgroup 用量 / VRAM。只在内存跳变 ≥ 阈值时输出一行，
+# 因此无论进程死在哪一步（包括 ComfyUI 核心的模型加载阶段），日志里都会留下
+# 完整的内存增长曲线，用于定位 OOM。
+try:
+    import threading
+    import time as _time
+
+    from .director.vram_cleanup import available_system_memory_mb as _avail_mb
+
+    _WATCHDOG_STOP = threading.Event()
+    _watchdog_last = {"rss": None, "vram": None}
+
+    def _watchdog_rss_mb() -> int | None:
+        try:
+            with open("/proc/self/status", "r") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1]) // 1024
+        except Exception:
+            pass
+        return None
+
+    def _watchdog_vram_mb() -> int:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return int(torch.cuda.memory_allocated()) // (1024 * 1024)
+        except Exception:
+            pass
+        return 0
+
+    def _memory_watchdog() -> None:
+        log = logging.getLogger("ComfyUI-MiniMaxH3-Director.watchdog")
+        while not _WATCHDOG_STOP.wait(2.0):
+            rss = _watchdog_rss_mb()
+            vram = _watchdog_vram_mb()
+            if rss is None:
+                continue
+            prev_rss, prev_vram = _watchdog_last["rss"], _watchdog_last["vram"]
+            jump = prev_rss is None or abs(rss - prev_rss) >= 512 or abs(vram - (prev_vram or 0)) >= 512
+            if jump:
+                avail = _avail_mb()
+                extra = f", cgroup可用={avail}MB" if avail is not None else ""
+                log.info(
+                    "[watchdog] RSS=%dMB (%+d), VRAM=%dMB%s",
+                    rss, (rss - prev_rss) if prev_rss is not None else 0,
+                    vram, extra,
+                )
+                _watchdog_last["rss"] = rss
+                _watchdog_last["vram"] = vram
+
+    if not _WATCHDOG_STOP.is_set() and not hasattr(sys, "_minimax_watchdog_started"):
+        sys._minimax_watchdog_started = True
+        threading.Thread(
+            target=_memory_watchdog, name="minimax-mem-watchdog", daemon=True
+        ).start()
+        _log.info("MiniMax H3 Director memory watchdog started (RSS/VRAM, 2s poll)")
+except Exception as _watchdog_exc:
+    _log.warning("MiniMax H3 Director memory watchdog failed to start: %s", _watchdog_exc)
+
 try:
     from .director.http_routes import register_routes as _register_director_routes
 

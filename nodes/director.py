@@ -221,6 +221,9 @@ class MiniMaxH3Director:
     ):
         del kwargs
 
+        from ..director.vram_cleanup import log_memory_snapshot
+
+        log_memory_snapshot("Director.execute enter")
         plan = prepare_director_plan(
             timeline_data=timeline_data,
             task_type=task_type,
