@@ -51,11 +51,16 @@ class SegmentRef:
 
 @dataclass
 class SegmentRefAudio:
-    """Standalone reference audio for MiniMax ``<Audio N>`` (index 0-based)."""
+    """Standalone reference audio for MiniMax ``<Audio N>`` (index 0-based).
+
+    ``audio`` may be ``None`` for timeline-card entries — file metadata only;
+    decoded lazily per segment via :func:`resolve_segment_ref_audios`.
+    """
 
     index: int
-    audio: dict  # ComfyUI AUDIO: {waveform, sample_rate}
+    audio: dict | None  # ComfyUI AUDIO: {waveform, sample_rate}
     audio_file: str = ""
+    meta: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -278,6 +283,13 @@ def load_reference_audio_item(item: dict) -> dict | None:
 
 
 def _load_ref_audios(audio_list: list[dict]) -> list[SegmentRefAudio]:
+    """Defer timeline-card reference audios (up to 3 slots).
+
+    No decoding happens here — the「公共参数」audio used to be decoded once per
+    segment at plan-build time (N groups = N resident waveform copies). We keep
+    file metadata only; the waveform is decoded per segment right before
+    conditioning via ``resolve_segment_ref_audios``.
+    """
     out: list[SegmentRefAudio] = []
     for item in audio_list or []:
         if not isinstance(item, dict):
@@ -285,12 +297,32 @@ def _load_ref_audios(audio_list: list[dict]) -> list[SegmentRefAudio]:
         index = int(item.get("index", item.get("slot", len(out))))
         if index < 0 or index >= MAX_REFERENCE_AUDIOS:
             continue
-        audio = load_reference_audio_item(item)
-        if audio is None:
-            continue
         rel = str(item.get("audioFile") or item.get("audio_file") or item.get("fileName") or "").strip()
-        out.append(SegmentRefAudio(index=index, audio=audio, audio_file=rel))
+        out.append(SegmentRefAudio(index=index, audio=None, audio_file=rel, meta=dict(item)))
     return sorted(out, key=lambda a: a.index)
+
+
+def resolve_segment_ref_audios(seg: SegmentPlan) -> dict | None:
+    """Materialize ``<Audio N>`` waveforms lazily, right before conditioning.
+
+    Entries already carrying audio (external Group nodes) pass through;
+    timeline-card entries hold only file metadata and are decoded here, then
+    released by the caller after conditioning.
+    """
+    items: list[tuple[int, dict]] = []
+    for i, a in enumerate(getattr(seg, "ref_audios", None) or []):
+        audio = getattr(a, "audio", None)
+        if audio is None:
+            meta = getattr(a, "meta", None) or {}
+            if not str(
+                meta.get("audioFile") or meta.get("audio_file") or meta.get("fileName") or ""
+            ).strip():
+                continue
+            audio = load_reference_audio_item(meta)
+            if audio is None:
+                continue
+        items.append((int(getattr(a, "index", i)), audio))
+    return ref_audios_dict(items)
 
 
 def segment_ref_audios_for_context(task_key: str, audios: list[SegmentRefAudio]) -> list[SegmentRefAudio]:

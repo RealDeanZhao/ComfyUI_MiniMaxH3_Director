@@ -33,12 +33,12 @@ from .plan import (
     DirectorPlan,
     plan_summary,
     prepare_segment_clip,
-    ref_audios_to_dict,
     reference_video_for_segment,
     refs_to_kwargs_for_context,
     reinforce_r2v_prompt,
     reinforce_rv2v_prompt,
     reinforce_v2v_prompt,
+    resolve_segment_ref_audios,
     resolve_segment_ref_videos,
 )
 from .progress import (
@@ -211,7 +211,9 @@ def _build_minimax_inputs(
             ref_video = reference_video_for_segment(plan, seg, num_frames=nframes)
             if ref_video is not None and ref_video.shape[0] > 0:
                 ref_videos = {"ref_video_0": ref_video}
-        ref_audios = ref_audios_to_dict(getattr(seg, "ref_audios", None) or [])
+        # Timeline-card audios decode lazily here (per segment) and are released
+        # after conditioning — plan build no longer holds every group's waveforms.
+        ref_audios = resolve_segment_ref_audios(seg)
         ref_video_audios = _ref_video_audios_to_dict(getattr(seg, "ref_video_audios", None) or [])
     elif task_key in {"v2v", "rv2v"}:
         # Bernini-style video edit: each timeline segment's source clip → <Video 1>.
@@ -234,7 +236,7 @@ def _build_minimax_inputs(
                 ref_images[f"ref_image_{idx}"] = tensor[:1] if tensor.ndim == 4 else tensor
             if not ref_images:
                 ref_images = None
-            ref_audios = ref_audios_to_dict(getattr(seg, "ref_audios", None) or [])
+            ref_audios = resolve_segment_ref_audios(seg)
 
     return first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios
 
@@ -454,6 +456,11 @@ def execute_director_plan_core(
         reports.append("Audio: source — skip audio VAE decode, use original timeline audio.")
     else:
         reports.append("Audio: generate — decode MiniMax H3 AV latent audio.")
+    if not stream_export and seg_total >= 4:
+        reports.append(
+            "内存提示：常规导出在结尾需拼接全片（含 pre_refine 双份，峰值随总时长增长）。"
+            "段数较多时建议改用「流式导出」——逐段从磁盘缓存渲染 mp4，峰值与总时长无关。"
+        )
     selected_ui = ext_meta.get("selected")
     if selected_ui is not None:
         selected_set = {int(x) for x in selected_ui}
