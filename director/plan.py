@@ -113,6 +113,18 @@ class SegmentPlan:
     ui_index: int | None = None
     # Per-segment「引用上段」; master「段间引导」must also be on. Default True.
     continuity_from_prev: bool = True
+    # External group packs (Director Group nodes): hold the packed group dict +
+    # fit context instead of fitted tensor copies, so an N-segment plan does not
+    # pin every group's reference media in RAM for the whole run. Tensors are
+    # materialized per segment right before sampling (materialize_segment_media)
+    # and released immediately after the segment finishes (release_segment_media).
+    external_group: dict | None = None
+    media_fit: tuple[int, int, str, int] | None = None
+    common_media_refs: list = field(default_factory=list)
+    common_media_audios: list = field(default_factory=list)
+    # Precomputed cache-fingerprint fragments for lazy segments (refs/ref_audios/
+    # ref_videos lines) so fingerprints stay identical before/after release.
+    media_fingerprint: dict | None = None
 
     @property
     def frame_count(self) -> int:

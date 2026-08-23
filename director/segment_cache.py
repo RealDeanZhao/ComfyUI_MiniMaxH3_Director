@@ -35,18 +35,26 @@ def _cache_root(node_id: str) -> Path | None:
 
 def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
     """Stable identity for a segment 鈥?cache invalidates when edit params change."""
-    ref_files = sorted(
-        f"img{ref.index}:{(getattr(ref, 'image_file', '') or '')}"
-        for ref in seg.refs
-    )
-    ref_audio_files = sorted(
-        f"aud{getattr(a, 'index', i)}:{(getattr(a, 'audio_file', '') or '')}"
-        for i, a in enumerate(getattr(seg, "ref_audios", None) or [])
-    )
-    ref_video_files = sorted(
-        f"vid{getattr(v, 'index', i)}:{(getattr(v, 'video_file', '') or '')}"
-        for i, v in enumerate(getattr(seg, "ref_videos", None) or [])
-    )
+    # Lazy external-group segments carry precomputed media fragments so the
+    # fingerprint is identical before and after release_segment_media().
+    mf = getattr(seg, "media_fingerprint", None)
+    if isinstance(mf, dict):
+        ref_files = sorted(str(x) for x in mf.get("refs", []))
+        ref_audio_files = sorted(str(x) for x in mf.get("ref_audios", []))
+        ref_video_files = sorted(str(x) for x in mf.get("ref_videos", []))
+    else:
+        ref_files = sorted(
+            f"img{ref.index}:{(getattr(ref, 'image_file', '') or '')}"
+            for ref in seg.refs
+        )
+        ref_audio_files = sorted(
+            f"aud{getattr(a, 'index', i)}:{(getattr(a, 'audio_file', '') or '')}"
+            for i, a in enumerate(getattr(seg, "ref_audios", None) or [])
+        )
+        ref_video_files = sorted(
+            f"vid{getattr(v, 'index', i)}:{(getattr(v, 'video_file', '') or '')}"
+            for i, v in enumerate(getattr(seg, "ref_videos", None) or [])
+        )
     ref_video_file = (
         seg.reference_video_meta.get("videoFile")
         or seg.reference_video_meta.get("fileName")
@@ -169,7 +177,16 @@ def save_segment_cache(
     handoff_path = root / f"seg_{idx:04d}.handoff.json"
     audio_path = root / f"seg_{idx:04d}.audio.pt"
     try:
-        payload = tensor.cpu().float().contiguous()
+        if (
+            tensor.is_cpu
+            and tensor.dtype == torch.float32
+            and tensor.is_contiguous()
+        ):
+            # Already a CPU float32 contiguous chunk — save in place instead of
+            # duplicating several GB of decoded frames for every segment.
+            payload = tensor
+        else:
+            payload = tensor.cpu().float().contiguous()
         _write_via_temp(pt_path, lambda p: torch.save(payload, p))
         text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
         _write_via_temp(

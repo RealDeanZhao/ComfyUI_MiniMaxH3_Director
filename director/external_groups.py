@@ -149,7 +149,10 @@ def pack_r2v_group(
             continue
         i = int(idx)
         if 0 <= i < MAX_REFERENCE_VIDEOS:
-            videos[i] = t.clone()
+            # Reference (no clone): the upstream LoadVideo output stays cached by
+            # the graph for this run anyway, so a clone would double RAM per
+            # group (~GBs each). Downstream fits are made lazily per segment.
+            videos[i] = t
 
     v_audios: dict[int, dict] = {}
     for idx, aud in (ref_video_audios or {}).items():
@@ -439,8 +442,6 @@ def build_plan_from_external_groups(
             kind = g["kind"]
             first = g.get("first_frame")
             last = g.get("last_frame")
-            refs: list[SegmentRef] = []
-            source_clip = None
             # Prefer per-group kind (t2v / i2v / fl2v) so prompt-only groups stay t2v
             # even when the Director task dropdown is fl2v.
             if kind in I2V_FAMILY:
@@ -451,38 +452,19 @@ def build_plan_from_external_groups(
                 seg_task_key = "t2v"
 
             if first is not None or last is not None:
-                start_img = (
-                    _fit_image(
-                        first, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
-                    )
-                    if first is not None
-                    else None
-                )
-                end_img = (
-                    _fit_image(
-                        last, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
-                    )
-                    if last is not None
-                    else None
-                )
-                start_img, end_img = _unify_fl2v_pair_canvas(start_img, end_img)
-                refs = []
-                if start_img is not None:
-                    refs.append(SegmentRef(index=0, tensor=start_img[:1].clone()))
-                if end_img is not None:
-                    refs.append(SegmentRef(index=1, tensor=end_img[:1].clone()))
-                # Last-only: skip source_clip so executor won't treat held end as first_frame.
-                source_clip = (
-                    _build_fl2v_endpoint_source(start_img, end_img, fc)
-                    if start_img is not None
-                    else None
-                )
                 if seg_task_key in {"fl2v", "i2v"}:
                     prompt = reinforce_fl2v_prompt(
                         prompt,
-                        has_end_frame=end_img is not None,
-                        has_start_frame=start_img is not None,
+                        has_end_frame=last is not None,
+                        has_start_frame=first is not None,
                     )
+            # Media stays lazy: fit + endpoint source clip are built inside
+            # materialize_segment_media right before this segment samples.
+            mf_refs = []
+            if first is not None:
+                mf_refs.append("img0:")
+            if last is not None:
+                mf_refs.append("img1:")
 
             row = timeline_row_for_index(timeline, int(src_index))
             if not row and isinstance(g, dict):
@@ -496,64 +478,45 @@ def build_plan_from_external_groups(
                     task_type=task_label,
                     task_key=seg_task_key,
                     use_global=False,
-                    refs=refs,
+                    refs=[],
                     negative_prompt=DEFAULT_FL2V_NEGATIVE if seg_task_key == "fl2v" else "",
-                    source_clip=source_clip,
+                    source_clip=None,
                     ui_index=int(src_index),
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
+                    external_group=g,
+                    media_fit=(int(seg_w), int(seg_h), str(seg_mode), int(ref_max)),
+                    media_fingerprint={"refs": sorted(mf_refs)},
                 )
             )
         else:
-            # r2v — per-group media + Director timeline.global common media/prompt
-            refs = []
-            for idx, tensor in sorted((g.get("ref_images") or {}).items()):
-                fitted = _fit_image(
-                    tensor, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
-                )
-                refs.append(SegmentRef(index=int(idx), tensor=fitted[:1].clone()))
-            if common_refs_raw:
-                common_fitted = []
-                for cref in common_refs_raw:
-                    fitted = _fit_image(
-                        cref.tensor,
-                        width=seg_w,
-                        height=seg_h,
-                        output_mode=seg_mode,
-                        ref_max_size=ref_max,
-                    )
-                    common_fitted.append(
-                        SegmentRef(
-                            index=int(cref.index),
-                            tensor=fitted[:1].clone(),
-                            image_file=getattr(cref, "image_file", "") or "",
-                        )
-                    )
-                refs = merge_indexed_refs(common_fitted, refs)
-            ref_videos = []
-            for idx, frames in sorted((g.get("ref_videos") or {}).items()):
-                fitted = _fit_image(
-                    frames, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
-                )
-                ref_videos.append(
-                    SegmentRefVideo(index=int(idx), tensor=fitted.clone(), video_file="", meta={"external": True})
-                )
-            ref_audios = [
-                SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
-                for idx, aud in sorted((g.get("ref_audios") or {}).items())
-            ]
-            if common_audios_raw:
-                ref_audios = merge_indexed_refs(common_audios_raw, ref_audios)
-            ref_video_audios = [
-                SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
-                for idx, aud in sorted((g.get("ref_video_audios") or {}).items())
-            ]
+            # r2v — per-group media + Director timeline.global common media/prompt.
+            # Media stays lazy: fitted tensors are built in
+            # materialize_segment_media right before this segment samples, and
+            # released right after — an N-segment plan never holds all groups'
+            # reference videos at once.
+            group_img_idx = {int(i): "" for i in (g.get("ref_images") or {})}
+            common_img_idx = {
+                int(cref.index): (getattr(cref, "image_file", "") or "")
+                for cref in common_refs_raw
+            }
+            merged_img_idx = dict(common_img_idx)
+            merged_img_idx.update(group_img_idx)
+
+            group_aud_idx = {int(i): "" for i in (g.get("ref_audios") or {})}
+            common_aud_idx = {
+                int(cref.index): (getattr(cref, "audio_file", "") or "")
+                for cref in common_audios_raw
+            }
+            merged_aud_idx = dict(common_aud_idx)
+            merged_aud_idx.update(group_aud_idx)
+
             prompt = reinforce_r2v_prompt(
                 prompt,
-                ref_indices=[r.index for r in refs],
-                video_indices=[v.index for v in ref_videos],
-                audio_indices=[a.index for a in ref_audios],
+                ref_indices=sorted(merged_img_idx),
+                video_indices=sorted(int(i) for i in (g.get("ref_videos") or {})),
+                audio_indices=sorted(merged_aud_idx),
             )
             row = timeline_row_for_index(timeline, int(src_index))
             if not row and isinstance(g, dict):
@@ -567,15 +530,24 @@ def build_plan_from_external_groups(
                     task_type=task_label,
                     task_key="r2v",
                     use_global=False,
-                    refs=refs,
-                    ref_audios=ref_audios,
-                    ref_videos=ref_videos,
-                    ref_video_audios=ref_video_audios,
+                    refs=[],
+                    ref_audios=[],
+                    ref_videos=[],
+                    ref_video_audios=[],
                     source_clip=None,
                     ui_index=int(src_index),
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
+                    external_group=g,
+                    media_fit=(int(seg_w), int(seg_h), str(seg_mode), int(ref_max)),
+                    common_media_refs=list(common_refs_raw),
+                    common_media_audios=list(common_audios_raw),
+                    media_fingerprint={
+                        "refs": sorted(f"img{i}:{f}" for i, f in merged_img_idx.items()),
+                        "ref_audios": sorted(f"aud{i}:{f}" for i, f in merged_aud_idx.items()),
+                        "ref_videos": sorted(f"vid{i}:" for i in (g.get("ref_videos") or {})),
+                    },
                 )
             )
 
@@ -626,3 +598,121 @@ def build_plan_from_external_groups(
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
     )
+
+
+def materialize_segment_media(plan, seg) -> None:
+    """Build the segment's fitted media tensors from its packed external group.
+
+    Called lazily right before the segment samples. Only this segment's media
+    is resident during its own run; call ``release_segment_media`` when done.
+    No-op for segments without an external group (UI timeline plans).
+    """
+    g = getattr(seg, "external_group", None)
+    if not isinstance(g, dict):
+        return
+
+    from .plan import SegmentRef, SegmentRefAudio, SegmentRefVideo, merge_indexed_refs
+
+    fit = getattr(seg, "media_fit", None)
+    if fit is not None:
+        w, h, mode, ref_max = int(fit[0]), int(fit[1]), str(fit[2]), int(fit[3])
+    else:
+        w, h, mode, ref_max = (
+            int(plan.width),
+            int(plan.height),
+            str(plan.output_mode),
+            int(plan.ref_max_size),
+        )
+
+    def _fit(img: torch.Tensor) -> torch.Tensor:
+        return _fit_image(img, width=w, height=h, output_mode=mode, ref_max_size=ref_max)
+
+    if g.get("family") == "i2v":
+        from .fl2v_timeline import _build_fl2v_endpoint_source, _unify_fl2v_pair_canvas
+
+        first = g.get("first_frame")
+        last = g.get("last_frame")
+        refs: list[SegmentRef] = []
+        source_clip = None
+        if first is not None or last is not None:
+            start_img = _fit(first) if first is not None else None
+            end_img = _fit(last) if last is not None else None
+            start_img, end_img = _unify_fl2v_pair_canvas(start_img, end_img)
+            if start_img is not None:
+                refs.append(SegmentRef(index=0, tensor=start_img[:1].clone()))
+            if end_img is not None:
+                refs.append(SegmentRef(index=1, tensor=end_img[:1].clone()))
+            # Last-only: skip source_clip so executor won't treat held end as first_frame.
+            source_clip = (
+                _build_fl2v_endpoint_source(start_img, end_img, int(seg.frame_count))
+                if start_img is not None
+                else None
+            )
+        seg.refs = refs
+        seg.source_clip = source_clip
+        return
+
+    # r2v — per-group media + Director timeline.global common media/prompt.
+    refs = []
+    for idx, tensor in sorted((g.get("ref_images") or {}).items()):
+        fitted = _fit(tensor)
+        refs.append(SegmentRef(index=int(idx), tensor=fitted[:1].clone()))
+    common_refs = list(getattr(seg, "common_media_refs", None) or [])
+    if common_refs:
+        common_fitted = []
+        for cref in common_refs:
+            fitted = _fit(cref.tensor)
+            common_fitted.append(
+                SegmentRef(
+                    index=int(cref.index),
+                    tensor=fitted[:1].clone(),
+                    image_file=getattr(cref, "image_file", "") or "",
+                )
+            )
+        refs = merge_indexed_refs(common_fitted, refs)
+    seg.refs = refs
+
+    ref_videos = []
+    for idx, frames in sorted((g.get("ref_videos") or {}).items()):
+        fitted = _fit(frames)
+        ref_videos.append(
+            SegmentRefVideo(
+                index=int(idx), tensor=fitted.clone(), video_file="", meta={"external": True}
+            )
+        )
+    seg.ref_videos = ref_videos
+
+    seg.ref_audios = [
+        SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
+        for idx, aud in sorted((g.get("ref_audios") or {}).items())
+    ]
+    common_audios = list(getattr(seg, "common_media_audios", None) or [])
+    if common_audios:
+        seg.ref_audios = merge_indexed_refs(common_audios, seg.ref_audios)
+
+    seg.ref_video_audios = [
+        SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
+        for idx, aud in sorted((g.get("ref_video_audios") or {}).items())
+    ]
+
+
+def release_segment_media(seg) -> bool:
+    """Drop a lazy segment's media tensors + group reference after it finished.
+
+    Only touches segments created from external group packs (they carry a
+    stable ``media_fingerprint``, so disk-cache fingerprints stay valid after
+    release). UI-timeline segments keep their (small) fields untouched.
+
+    Returns True when tensors were actually released.
+    """
+    if getattr(seg, "external_group", None) is None:
+        return False
+    seg.external_group = None
+    seg.common_media_refs = []
+    seg.common_media_audios = []
+    seg.refs = []
+    seg.ref_videos = []
+    seg.ref_audios = []
+    seg.ref_video_audios = []
+    seg.source_clip = None
+    return True

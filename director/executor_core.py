@@ -23,6 +23,7 @@ from .audio_export import (
     empty_audio_dict,
     resolve_audio_mode,
 )
+from .external_groups import materialize_segment_media, release_segment_media
 from .segment_runtime import (
     frames_label,
     resolve_segment_raw_clip,
@@ -508,6 +509,10 @@ def execute_director_plan_core(
         seg, *, progress_index: int
     ) -> tuple[torch.Tensor, dict[str, Any] | None, torch.Tensor]:
         seg_start = datetime.now()
+        # External group packs: build this segment's fitted media (ref images /
+        # videos / endpoint keyframes) now, from the packed group dict — an
+        # N-segment plan never holds all groups' media at once.
+        materialize_segment_media(plan, seg)
         if seg.task_key not in SUPPORTED_TASK_KEYS:
             raise ValueError(
                 f"Task '{seg.task_key}' is not supported on MiniMax H3 Director. "
@@ -1234,6 +1239,8 @@ def execute_director_plan_core(
             chunk, audio_dict, pre_chunk = _run_one_segment(
                 seg, progress_index=progress_pos[seg.index]
             )
+            # This segment is done: free its reference media (external packs).
+            release_segment_media(seg)
             if stream_export:
                 # 流式导出：最终成片由磁盘缓存流式渲染，无需全片拼接。写完缓存后
                 # 只保留紧邻前一段的解码帧 / 音频（motion context 只读 prev_idx），
@@ -1244,6 +1251,9 @@ def execute_director_plan_core(
                 )
                 _prune_completed_tensors(
                     completed_pre_refine, keep=seg.index, label="pre-refine outputs"
+                )
+                _prune_completed_tensors(
+                    completed_refine_passes, keep=seg.index, label="refine pass clips"
                 )
                 for idx in [i for i in completed_audios if i != seg.index]:
                     del completed_audios[idx]
