@@ -177,13 +177,16 @@ def _build_gen_source_clips(
     output_mode: str,
     ref_max_size: int,
 ) -> list[torch.Tensor]:
-    chunks: list[torch.Tensor] = []
+    chunks: list[torch.Tensor | None] = []
     for _start, end, seg_data in ranges:
         frame_count = end - _start
         if frame_count <= 0:
             continue
         if submode == "gen_blank":
-            clip = torch.full((frame_count, height, width, 3), 0.5, dtype=torch.float32)
+            # t2v/r2v 无源素材：不再物化全尺寸灰色占位（8×15s @0.9MP 会吃掉
+            # 数十 GB 且整任务驻留）。执行器对空 clip 有回退路径。
+            chunks.append(None)
+            continue
         else:
             ref = _resolve_gen_image_ref(seg_data, edit_mode=edit_mode, global_block=global_block)
             if ref is None:
@@ -350,11 +353,18 @@ def build_gen_director_plan(
         ref_max_size=ref_max,
     )
     attach_source_clips = is_prompt_batch_timeline(timeline, task_key) and task_key in ("i2i", "i2v")
+    non_null_clips = [c for c in source_clips if c is not None]
     if attach_source_clips:
-        # Placeholder timeline index only 鈥?spatial data comes from each segment's source_clip.
+        # Placeholder timeline index only — spatial data comes from each segment's source_clip.
         source_video = torch.full((len(source_clips), 16, 16, 3), 0.5, dtype=torch.float32)
+    elif non_null_clips:
+        source_video = cat_frames_variable_size(non_null_clips)
     else:
-        source_video = cat_frames_variable_size(source_clips)
+        # 纯生成批量（t2v/r2v）：微型占位即可——与 external-groups r2v 路径一致，
+        # 不再拼接全尺寸灰色大张量（8×15s @0.9MP 拼接峰值 ~66GB）。
+        source_video = torch.full(
+            (max(1, len(source_clips)), 16, 16, 3), 0.5, dtype=torch.float32
+        )
 
     from .segment_continuity import resolve_segment_continuity_from_prev
 
@@ -456,7 +466,8 @@ def build_gen_director_plan(
                 idx + 1,
                 seg_task_key,
             )
-        seg_source = source_clips[idx].clone() if idx < len(source_clips) else None
+        raw_src = source_clips[idx] if idx < len(source_clips) else None
+        seg_source = raw_src.clone() if raw_src is not None else None
 
         segments.append(
             SegmentPlan(

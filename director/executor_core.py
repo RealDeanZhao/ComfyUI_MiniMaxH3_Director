@@ -159,6 +159,50 @@ def _release_segment_media(seg) -> int:
     return freed
 
 
+def _hydrate_lazy_ref_videos(seg) -> int:
+    """Decode lazy r2v reference-video stubs just-in-time.
+
+    Plan build only records the file spec (meta['lazy']) so an N-segment batch
+    no longer decodes every group's ref videos up front; each segment loads
+    its own copy here, right before conditioning, and releases it afterwards.
+    Returns bytes hydrated.
+    """
+    hydrated = 0
+    for v in getattr(seg, "ref_videos", None) or []:
+        if getattr(v, "tensor", None) is not None:
+            continue
+        meta = getattr(v, "meta", None) or {}
+        if not meta.get("lazy"):
+            continue
+        from ..lib.video_io import load_reference_video_clip
+
+        timeline = {
+            "frameRate": meta.get("fps"),
+            "refMaxSize": meta.get("long_edge"),
+            "output": {"longEdge": meta.get("long_edge")},
+        }
+        try:
+            tensor = load_reference_video_clip(
+                meta.get("item") or {},
+                timeline,
+                int(meta.get("num_frames") or 5),
+            )
+        except Exception as exc:
+            log.warning(
+                "Reference video slot %s failed to load: %s",
+                getattr(v, "index", "?"), exc,
+            )
+            continue
+        if tensor is None or tensor.numel() <= 0:
+            log.warning("Reference video slot %s decoded to empty frames.", getattr(v, "index", "?"))
+            continue
+        v.tensor = tensor
+        hydrated += _tensor_bytes(tensor)
+    if hydrated:
+        log.info("Hydrated lazy ref videos: %.2f GB", hydrated / 2**30)
+    return hydrated
+
+
 def _unpack_node_output(out):
     if hasattr(out, "args"):
         args = out.args
@@ -277,6 +321,7 @@ def _build_minimax_inputs(
         if not ref_images:
             ref_images = None
         # Prefer multi-slot ref_videos (r2v batch cards); fall back to legacy single meta.
+        _hydrate_lazy_ref_videos(seg)
         ref_videos = ref_videos_to_dict(getattr(seg, "ref_videos", None) or [])
         if not ref_videos:
             nframes = max(5, int(getattr(seg, "frame_count", 0) or plan.total_frames or 124))

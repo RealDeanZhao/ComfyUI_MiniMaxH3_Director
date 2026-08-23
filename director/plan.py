@@ -311,7 +311,25 @@ def _load_ref_videos(
     timeline: dict,
     num_frames: int,
 ) -> list[SegmentRefVideo]:
-    """Load up to 3 standalone reference videos for r2v / ReferenceToVideo."""
+    """Stub entries for standalone r2v reference videos — NOT decoded here.
+
+    Plan build used to decode every segment's ref videos up front, so an
+    N-segment batch held N groups' full-res frame tensors in RAM before the
+    executor even started. Stubs carry the load spec in ``meta``; the executor
+    hydrates each segment just-in-time (executor_core._hydrate_lazy_ref_videos)
+    and releases it after conditioning.
+    """
+    output_block = timeline.get("output") or {}
+    long_edge = (
+        int(
+            output_block.get("longEdge")
+            or output_block.get("long_edge")
+            or timeline.get("refMaxSize")
+            or 0
+        )
+        or None
+    )
+    fps = float(timeline.get("frameRate") or 24)
     out: list[SegmentRefVideo] = []
     for item in video_list or []:
         if not isinstance(item, dict) or not _ref_video_entry_has_file(item):
@@ -319,15 +337,21 @@ def _load_ref_videos(
         index = int(item.get("index", item.get("slot", len(out))))
         if index < 0 or index >= MAX_REFERENCE_VIDEOS:
             continue
-        try:
-            tensor = load_reference_video_clip(item, timeline, num_frames, start_frame=0)
-        except Exception as exc:
-            log.warning("Failed to load reference video slot %s: %s", index, exc)
-            continue
-        if tensor is None or tensor.numel() <= 0:
-            continue
         rel = str(item.get("videoFile") or item.get("fileName") or "").strip()
-        out.append(SegmentRefVideo(index=index, tensor=tensor, video_file=rel, meta=dict(item)))
+        out.append(
+            SegmentRefVideo(
+                index=index,
+                tensor=None,
+                video_file=rel,
+                meta={
+                    "lazy": True,
+                    "item": dict(item),
+                    "num_frames": max(1, int(num_frames)),
+                    "fps": fps,
+                    "long_edge": long_edge,
+                },
+            )
+        )
     return sorted(out, key=lambda v: v.index)
 
 
