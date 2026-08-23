@@ -77,6 +77,7 @@ from .segment_continuity import (
     resolve_prev_segment_output,
 )
 from .vram_cleanup import cleanup_segment_vram
+from .mem_trace import tensor_bytes_mb, trace as mem_trace
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
 
@@ -320,6 +321,7 @@ def execute_director_plan_core(
     str,
 ]:
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
+    mem_trace("plan ready")
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
     # UI toggle on the player bar (timeline.liveTaePreview); default on.
@@ -513,6 +515,7 @@ def execute_director_plan_core(
         # videos / endpoint keyframes) now, from the packed group dict — an
         # N-segment plan never holds all groups' media at once.
         materialize_segment_media(plan, seg)
+        mem_trace(f"seg #{seg.index + 1} start (media materialized)")
         if seg.task_key not in SUPPORTED_TASK_KEYS:
             raise ValueError(
                 f"Task '{seg.task_key}' is not supported on MiniMax H3 Director. "
@@ -990,6 +993,9 @@ def execute_director_plan_core(
                 ),
                 sigmas=first_pass_sigmas,
             )
+        mem_trace(
+            f"seg #{seg.index + 1} sampled (av_latent={tensor_bytes_mb(samples):.0f}MB)"
+        )
 
         first_pass_gpu = None
         pre_export = None
@@ -1119,6 +1125,7 @@ def execute_director_plan_core(
         )
 
         chunk = decoded.cpu().float()
+        mem_trace(f"seg #{seg.index + 1} decoded (chunk={tensor_bytes_mb(chunk):.0f}MB)")
         if pre_export is not None:
             pre_export, _ = _trim_decoded_to_export(
                 pre_export,
@@ -1153,6 +1160,7 @@ def execute_director_plan_core(
         )
         completed_outputs[seg.index] = chunk
         completed_pre_refine[seg.index] = pre_chunk
+        mem_trace(f"seg #{seg.index + 1} cached")
         completed_refine_passes[seg.index] = pass_clips
 
         #「分段导出」: flush mp4 as soon as this segment succeeds (crash-safe).
@@ -1240,7 +1248,11 @@ def execute_director_plan_core(
                 seg, progress_index=progress_pos[seg.index]
             )
             # This segment is done: free its reference media (external packs).
-            release_segment_media(seg)
+            if release_segment_media(seg):
+                import gc as _gc
+
+                _gc.collect()
+            mem_trace(f"seg #{seg.index + 1} released")
             if stream_export:
                 # 流式导出：最终成片由磁盘缓存流式渲染，无需全片拼接。写完缓存后
                 # 只保留紧邻前一段的解码帧 / 音频（motion context 只读 prev_idx），
@@ -1417,6 +1429,7 @@ def execute_director_plan_core(
         export_frame_counts = stream_frame_counts
     video_path = ""
     if stream_export:
+        mem_trace("stream render start")
         # 流式导出（防 OOM）：从磁盘分段缓存流式渲染成片，跳过全量拼接。
         # 峰值内存约 2 段（≈6GB），与总时长无关；不依赖 images 输出。
         import os as _os
