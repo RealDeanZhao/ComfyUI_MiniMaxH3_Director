@@ -38,6 +38,12 @@ def resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
     if getattr(seg, "task_key", "") == "fl2v" and is_gen_timeline_plan(plan):
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
+    # r2v batch cards condition purely via refs — slicing the tiny placeholder
+    # gen source_video (len=segment_count) would fall through to a timeline
+    # video decode that cannot exist for gen timelines.
+    if getattr(seg, "task_key", "") == "r2v" and is_gen_timeline_plan(plan):
+        return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
+
     sv = plan.source_video
     if is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
         start = max(0, int(seg.start_frame))
@@ -72,6 +78,9 @@ def resolve_segment_raw_clip_with_lookahead(
 
     if getattr(seg, "task_key", "") == "fl2v" and is_gen_timeline_plan(plan):
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
+
+    if getattr(seg, "task_key", "") == "r2v" and is_gen_timeline_plan(plan):
+        return resolve_segment_raw_clip(plan, seg)
 
     end = int(seg.end_frame) + extra
     sv = plan.source_video

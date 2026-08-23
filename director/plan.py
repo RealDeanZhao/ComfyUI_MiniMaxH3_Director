@@ -60,10 +60,14 @@ class SegmentRefAudio:
 
 @dataclass
 class SegmentRefVideo:
-    """Standalone reference video for MiniMax ``<Video N>`` (index 0-based)."""
+    """Standalone reference video for MiniMax ``<Video N>`` (index 0-based).
+
+    ``tensor`` may be ``None`` for timeline-card entries — file metadata only;
+    decoded lazily per segment via :func:`resolve_segment_ref_videos`.
+    """
 
     index: int
-    tensor: torch.Tensor
+    tensor: torch.Tensor | None
     video_file: str = ""
     meta: dict = field(default_factory=dict)
 
@@ -311,7 +315,13 @@ def _load_ref_videos(
     timeline: dict,
     num_frames: int,
 ) -> list[SegmentRefVideo]:
-    """Load up to 3 standalone reference videos for r2v / ReferenceToVideo."""
+    """Defer timeline-card reference videos for r2v / ReferenceToVideo (up to 3 slots).
+
+    No decoding happens here — the full-frame pixel tensor for every group used
+    to be materialized at plan-build time and stayed resident for the whole run
+    (OOM with many groups). We only keep file metadata; the tensor is decoded
+    per segment right before conditioning via ``resolve_segment_ref_videos``.
+    """
     out: list[SegmentRefVideo] = []
     for item in video_list or []:
         if not isinstance(item, dict) or not _ref_video_entry_has_file(item):
@@ -319,16 +329,35 @@ def _load_ref_videos(
         index = int(item.get("index", item.get("slot", len(out))))
         if index < 0 or index >= MAX_REFERENCE_VIDEOS:
             continue
-        try:
-            tensor = load_reference_video_clip(item, timeline, num_frames, start_frame=0)
-        except Exception as exc:
-            log.warning("Failed to load reference video slot %s: %s", index, exc)
-            continue
-        if tensor is None or tensor.numel() <= 0:
-            continue
         rel = str(item.get("videoFile") or item.get("fileName") or "").strip()
-        out.append(SegmentRefVideo(index=index, tensor=tensor, video_file=rel, meta=dict(item)))
+        out.append(SegmentRefVideo(index=index, tensor=None, video_file=rel, meta=dict(item)))
     return sorted(out, key=lambda v: v.index)
+
+
+def resolve_segment_ref_videos(plan: DirectorPlan, seg: SegmentPlan) -> dict | None:
+    """Materialize r2v ``<Video N>`` frame tensors lazily, right before conditioning.
+
+    Entries already carrying a tensor (external Group nodes) pass through;
+    timeline-card entries hold only file metadata and are decoded here, then
+    released by the caller after conditioning.
+    """
+    nframes = max(5, int(getattr(seg, "frame_count", 0) or plan.total_frames or 124))
+    items: list[tuple[int, torch.Tensor]] = []
+    for i, v in enumerate(getattr(seg, "ref_videos", None) or []):
+        t = getattr(v, "tensor", None)
+        if t is None:
+            meta = getattr(v, "meta", None) or {}
+            if not _ref_video_entry_has_file(meta):
+                continue
+            try:
+                t = load_reference_video_clip(meta, plan.raw, nframes, start_frame=0)
+            except Exception as exc:
+                log.warning("Failed to load reference video slot %s: %s", getattr(v, "index", i), exc)
+                continue
+        if t is None or t.numel() <= 0:
+            continue
+        items.append((int(getattr(v, "index", i)), t))
+    return ref_videos_dict(items)
 
 
 def ref_videos_to_dict(videos: list[SegmentRefVideo]) -> dict | None:

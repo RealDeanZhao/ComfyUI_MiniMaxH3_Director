@@ -338,22 +338,32 @@ def build_gen_director_plan(
     if is_prompt_batch_timeline(timeline, task_key) and not is_video_batch_task_key(task_key):
         export_mode = "all"
 
-    source_clips = _build_gen_source_clips(
-        segment_ranges,
-        task_key=task_key,
-        submode=submode,
-        edit_mode=edit_mode,
-        global_block=global_block,
-        height=out_h,
-        width=out_w,
-        output_mode=out_mode,
-        ref_max_size=ref_max,
-    )
+    # t2v/r2v batch segments have no real source footage — the gray canvas was
+    # pure placeholder yet used to be materialized at full timeline length
+    # (~0.6 GB per 5s segment @864×480, ×3 copies with cat + clone → RAM OOM
+    # on multi-group runs before any Director log). Keep a tiny placeholder
+    # like external_groups/fl2v plans do.
+    placeholder_source = submode == "gen_blank" and is_video_batch_task_key(task_key)
+    if placeholder_source:
+        source_clips: list[torch.Tensor] = []
+        source_video = torch.full((len(segment_ranges), 16, 16, 3), 0.5, dtype=torch.float32)
+    else:
+        source_clips = _build_gen_source_clips(
+            segment_ranges,
+            task_key=task_key,
+            submode=submode,
+            edit_mode=edit_mode,
+            global_block=global_block,
+            height=out_h,
+            width=out_w,
+            output_mode=out_mode,
+            ref_max_size=ref_max,
+        )
     attach_source_clips = is_prompt_batch_timeline(timeline, task_key) and task_key in ("i2i", "i2v")
     if attach_source_clips:
         # Placeholder timeline index only 鈥?spatial data comes from each segment's source_clip.
         source_video = torch.full((len(source_clips), 16, 16, 3), 0.5, dtype=torch.float32)
-    else:
+    elif not placeholder_source:
         source_video = cat_frames_variable_size(source_clips)
 
     from .segment_continuity import resolve_segment_continuity_from_prev
@@ -456,7 +466,11 @@ def build_gen_director_plan(
                 idx + 1,
                 seg_task_key,
             )
-        seg_source = source_clips[idx].clone() if idx < len(source_clips) else None
+        seg_source = (
+            source_clips[idx].clone()
+            if not placeholder_source and idx < len(source_clips)
+            else None
+        )
 
         segments.append(
             SegmentPlan(

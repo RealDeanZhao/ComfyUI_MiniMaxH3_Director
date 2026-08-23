@@ -34,12 +34,12 @@ from .plan import (
     plan_summary,
     prepare_segment_clip,
     ref_audios_to_dict,
-    ref_videos_to_dict,
     reference_video_for_segment,
     refs_to_kwargs_for_context,
     reinforce_r2v_prompt,
     reinforce_rv2v_prompt,
     reinforce_v2v_prompt,
+    resolve_segment_ref_videos,
 )
 from .progress import (
     report_director_finish,
@@ -203,7 +203,9 @@ def _build_minimax_inputs(
         if not ref_images:
             ref_images = None
         # Prefer multi-slot ref_videos (r2v batch cards); fall back to legacy single meta.
-        ref_videos = ref_videos_to_dict(getattr(seg, "ref_videos", None) or [])
+        # Timeline-card entries are decoded lazily here (per segment) and released
+        # after conditioning — plan build no longer holds every group's frames.
+        ref_videos = resolve_segment_ref_videos(plan, seg)
         if not ref_videos:
             nframes = max(5, int(getattr(seg, "frame_count", 0) or plan.total_frames or 124))
             ref_video = reference_video_for_segment(plan, seg, num_frames=nframes)
@@ -711,6 +713,15 @@ def execute_director_plan_core(
             ref_video_audios=ref_video_audios,
             ref_audios=ref_audios,
         )
+        # Refs are baked into the conditioning now — drop decoded pixel tensors
+        # (esp. lazily-loaded <Video N> frames) before sampling to keep peak RAM
+        # at one segment's media instead of the whole timeline.
+        first_frame = None
+        last_frame = None
+        ref_images = None
+        ref_videos = None
+        ref_audios = None
+        ref_video_audios = None
 
         trim_frames = 0
         if use_motion_context:
