@@ -124,6 +124,41 @@ def _video_latent_shape(samples) -> str:
         return "?"
 
 
+def _tensor_bytes(t) -> int:
+    return int(t.numel()) * int(t.element_size()) if t is not None else 0
+
+
+def _segment_media_bytes(seg) -> int:
+    """Byte volume of a segment's resident reference media (images/videos/audio)."""
+    total = 0
+    for r in getattr(seg, "refs", None) or []:
+        total += _tensor_bytes(getattr(r, "tensor", None))
+    for v in getattr(seg, "ref_videos", None) or []:
+        total += _tensor_bytes(getattr(v, "tensor", None))
+    for a in (getattr(seg, "ref_audios", None) or []) + (
+        getattr(seg, "ref_video_audios", None) or []
+    ):
+        wf = (getattr(a, "audio", None) or {}).get("waveform")
+        total += _tensor_bytes(wf)
+    total += _tensor_bytes(getattr(seg, "source_clip", None))
+    return total
+
+
+def _release_segment_media(seg) -> int:
+    """Drop a segment's reference media tensors; returns bytes freed.
+
+    Only call after that segment's conditioning consumed them (or for segments
+    outside the run selection) — nothing reads these tensors later within one
+    execute; re-runs rebuild the plan from the group packs anyway.
+    """
+    freed = _segment_media_bytes(seg)
+    seg.refs = []
+    seg.ref_videos = []
+    seg.ref_audios = []
+    seg.ref_video_audios = []
+    return freed
+
+
 def _unpack_node_output(out):
     if hasattr(out, "args"):
         args = out.args
@@ -400,6 +435,32 @@ def execute_director_plan_core(
         vram_clean_mode, bool(plan.continuity_enabled),
     )
     log.info("Executor START memory: %s", mem_snapshot())
+
+    # r2v 批量任务：所有组的参考媒体在图执行期全程驻留（pack 克隆 ×2 份）。
+    # 未选中的段提前释放其引用；选中段的在各自 conditioning 后释放。
+    seg_media = {s.index: _segment_media_bytes(s) for s in all_segments}
+    total_media = sum(seg_media.values())
+    if total_media:
+        log.info(
+            "Executor refs media: total %.2f GB across %d segment(s), "
+            "largest %.2f GB (seg #%d)",
+            total_media / 2**30,
+            sum(1 for b in seg_media.values() if b),
+            max(seg_media.values() or [0]) / 2**30,
+            max(seg_media, key=lambda k: seg_media[k]),
+        )
+        released_unselected = 0
+        unselected_count = 0
+        for s in all_segments:
+            if s.index not in run_indices and seg_media.get(s.index):
+                released_unselected += _release_segment_media(s)
+                unselected_count += 1
+        if released_unselected:
+            log.info(
+                "Released refs media of %d unselected segment(s): %.2f GB",
+                unselected_count,
+                released_unselected / 2**30,
+            )
 
     output_chunks: list[torch.Tensor] = []
     output_pre_chunks: list[torch.Tensor] = []
@@ -779,6 +840,16 @@ def execute_director_plan_core(
             "Seg #%d conditioning done: tokens=%d | %s",
             ui_idx + 1, pos_tokens, mem_snapshot(),
         )
+
+        # 本段参考媒体已全部进入 conditioning——立即释放（批量 r2v 任务里
+        # 这是 GB 级常驻：8 组 × 参考视频克隆会在起跑前压爆 RAM）。
+        freed_media = _release_segment_media(seg)
+        del ref_images, ref_videos, ref_audios, ref_video_audios
+        if freed_media:
+            log.info(
+                "Seg #%d refs media released: %.2f GB | %s",
+                ui_idx + 1, freed_media / 2**30, mem_snapshot(),
+            )
 
         trim_frames = 0
         if use_motion_context:
