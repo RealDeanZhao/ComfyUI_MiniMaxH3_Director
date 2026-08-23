@@ -248,6 +248,9 @@ class MiniMaxH3Director:
             r2v_groups=r2v_groups,
             refine=refine,
         )
+        # Plan 已持有自己的 fit 后副本——立即释放组包里的大张量克隆
+        # （pack 层 clone），否则它们会被本函数局部变量钉住到任务结束。
+        del i2v_groups, r2v_groups
         if run_mode not in ("full", "refine_only", "export_only"):
             raise ValueError(
                 "MiniMax H3 Director: 未知运行模式 "
