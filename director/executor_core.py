@@ -1477,6 +1477,7 @@ def execute_director_plan_core(
             if same_as_final
             else concat_continuous_chunks(pre_source, export_segments, plan)
         )
+    mem_trace("export done")
     return (
         combined,
         segment_outputs,
