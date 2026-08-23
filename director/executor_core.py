@@ -75,7 +75,11 @@ from .segment_continuity import (
     is_continuity_active,
     resolve_prev_segment_output,
 )
-from .vram_cleanup import cleanup_segment_vram
+from .vram_cleanup import (
+    cleanup_segment_vram,
+    ensure_system_memory,
+    log_memory_snapshot,
+)
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
 
@@ -508,13 +512,17 @@ def execute_director_plan_core(
         seg, *, progress_index: int
     ) -> tuple[torch.Tensor, dict[str, Any] | None, torch.Tensor]:
         seg_start = datetime.now()
+        ui_idx = seg.timeline_index
+        # 段前预检：系统内存不足时先回收，仍不足则明确报错（避免被 OOM killer
+        # 无声 SIGKILL、丢失全部日志）。
+        ensure_system_memory(f"segment #{ui_idx + 1} preflight")
+        log_memory_snapshot(f"segment #{ui_idx + 1} start")
         if seg.task_key not in SUPPORTED_TASK_KEYS:
             raise ValueError(
                 f"Task '{seg.task_key}' is not supported on MiniMax H3 Director. "
                 f"Supported: {', '.join(sorted(SUPPORTED_TASK_KEYS))}."
             )
 
-        ui_idx = seg.timeline_index
         meta = {
             "frames_label": frames_label(seg),
             "task_key": seg.task_key,
@@ -899,8 +907,13 @@ def execute_director_plan_core(
             phase="context_encode", phase_value=1, phase_max=1, **meta,
         )
 
+        # 采样前只做轻量回收（gc + CUDA cache），不卸载模型：
+        # conditioning 刚加载的 CLIP 若在此处被整体卸载，采样阶段就要把 UNET
+        # 从磁盘重新经系统内存 staging（数十 GB RAM 尖峰），多段任务每段重复
+        # 一次，是 docker --memory OOM 的主要放大器。段间完整清理由每段结束
+        # 后的 cleanup_segment_vram 统一负责。
         if vram_clean_on:
-            cleanup_segment_vram(enabled=True, unload_models=vram_unload_models and seg_total > 1)
+            cleanup_segment_vram(enabled=True, unload_models=False)
 
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(
@@ -1225,6 +1238,7 @@ def execute_director_plan_core(
             "MiniMax H3 Director segment %d/%d done (%d frames, task=%s)",
             ui_idx + 1, timeline_seg_total, target_len, seg.task_key,
         )
+        log_memory_snapshot(f"segment #{ui_idx + 1} end")
         return chunk, audio_dict, pre_chunk
 
     for seg in all_segments:

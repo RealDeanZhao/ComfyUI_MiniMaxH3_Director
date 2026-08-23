@@ -115,8 +115,8 @@ def pack_i2v_group(
         "kind": kind,
         "prompt": (prompt or "").strip(),
         "duration_sec": float(duration_sec) if duration_sec is not None else DEFAULT_FL2V_DURATION_SEC,
-        "first_frame": first[:1].clone() if first is not None else None,
-        "last_frame": last[:1].clone() if last is not None else None,
+        "first_frame": first[:1] if first is not None else None,
+        "last_frame": last[:1] if last is not None else None,
         "ref_images": {},
         "ref_videos": {},
         "ref_video_audios": {},
@@ -140,7 +140,9 @@ def pack_r2v_group(
             continue
         i = int(idx)
         if 0 <= i < MAX_REFERENCE_IMAGES:
-            images[i] = t[:1].clone()
+            # 不 clone：上游 LoadImage 输出在整个 prompt 运行期都存活，
+            # 这里每张图多一份全分辨率拷贝会在多组任务里线性放大 RAM 基线。
+            images[i] = t[:1]
 
     videos: dict[int, torch.Tensor] = {}
     for idx, vid in (ref_videos or {}).items():
@@ -149,7 +151,7 @@ def pack_r2v_group(
             continue
         i = int(idx)
         if 0 <= i < MAX_REFERENCE_VIDEOS:
-            videos[i] = t.clone()
+            videos[i] = t
 
     v_audios: dict[int, dict] = {}
     for idx, aud in (ref_video_audios or {}).items():
@@ -468,9 +470,9 @@ def build_plan_from_external_groups(
                 start_img, end_img = _unify_fl2v_pair_canvas(start_img, end_img)
                 refs = []
                 if start_img is not None:
-                    refs.append(SegmentRef(index=0, tensor=start_img[:1].clone()))
+                    refs.append(SegmentRef(index=0, tensor=start_img[:1]))
                 if end_img is not None:
-                    refs.append(SegmentRef(index=1, tensor=end_img[:1].clone()))
+                    refs.append(SegmentRef(index=1, tensor=end_img[:1]))
                 # Last-only: skip source_clip so executor won't treat held end as first_frame.
                 source_clip = (
                     _build_fl2v_endpoint_source(start_img, end_img, fc)
@@ -512,7 +514,7 @@ def build_plan_from_external_groups(
                 fitted = _fit_image(
                     tensor, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
                 )
-                refs.append(SegmentRef(index=int(idx), tensor=fitted[:1].clone()))
+                refs.append(SegmentRef(index=int(idx), tensor=fitted[:1]))
             if common_refs_raw:
                 common_fitted = []
                 for cref in common_refs_raw:
@@ -526,7 +528,7 @@ def build_plan_from_external_groups(
                     common_fitted.append(
                         SegmentRef(
                             index=int(cref.index),
-                            tensor=fitted[:1].clone(),
+                            tensor=fitted[:1],
                             image_file=getattr(cref, "image_file", "") or "",
                         )
                     )
@@ -537,7 +539,7 @@ def build_plan_from_external_groups(
                     frames, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
                 )
                 ref_videos.append(
-                    SegmentRefVideo(index=int(idx), tensor=fitted.clone(), video_file="", meta={"external": True})
+                    SegmentRefVideo(index=int(idx), tensor=fitted, video_file="", meta={"external": True})
                 )
             ref_audios = [
                 SegmentRefAudio(index=int(idx), audio=aud, audio_file="")

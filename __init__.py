@@ -4,6 +4,19 @@ Based on ComfyUI official MiniMax H3 support (PR #15224 / #15228).
 Licensed under the Apache License, Version 2.0. See LICENSE.
 """
 
+# docker 里 stdout 默认块缓冲：进程被 OOM killer SIGKILL 时缓冲区日志全部丢失，
+# 看起来像"一行日志都没输出就死了"。改为行缓冲，保证每条日志立即落盘。
+# （容器侧仍建议加 PYTHONUNBUFFERED=1 双保险。）
+import sys
+
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 from .nodes.conditioning import (
     MiniMaxH3DirectorConditioning,
     MiniMaxH3DirectorPlannerConditioning,
