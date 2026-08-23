@@ -6,7 +6,7 @@ import logging
 
 import comfy.samplers
 
-from ..director.executor_core import execute_director_plan_core
+from ..director.executor_core import execute_director_plan_core, mem_snapshot
 from .director_common import (
     finalize_director_outputs,
     prepare_director_plan,
@@ -220,6 +220,19 @@ class MiniMaxH3Director:
         **kwargs,
     ):
         del kwargs
+
+        log.info(
+            "Director node START: canvas %dx%d @%.2ffps total=%df | run_mode=%s "
+            "export_type=%s clear_vram=%s | groups(r2v=%s,i2v=%s) refine=%s "
+            "sigmas=%s | inputs(model=%s,vae=%s,audio_vae=%s,clip=%s) | %s",
+            int(width), int(height), float(frame_rate), int(total_frames),
+            run_mode, export_type, clear_vram_between_segments,
+            r2v_groups is not None, i2v_groups is not None, refine is not None,
+            sigmas is not None,
+            model is not None, video_vae is not None, audio_vae is not None,
+            clip is not None, mem_snapshot(),
+        )
+        log.info("Director timeline_data bytes=%d", len(timeline_data or ""))
 
         plan = prepare_director_plan(
             timeline_data=timeline_data,

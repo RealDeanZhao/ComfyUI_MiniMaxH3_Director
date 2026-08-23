@@ -85,6 +85,45 @@ _MAX_PREVIEW_FRAMES = 12
 _MAX_LIVE_PREVIEWS = 12
 
 
+def mem_snapshot() -> str:
+    """One-line VRAM/RSS usage for OOM forensics (never raises)."""
+    parts = []
+    try:
+        import comfy.model_management as mm
+
+        dev = mm.get_torch_device()
+        if getattr(dev, "type", "") == "cuda" and torch.cuda.is_available():
+            free_b, total_b = torch.cuda.mem_get_info(dev)
+            alloc = torch.cuda.memory_allocated(dev) / 2**30
+            resv = torch.cuda.memory_reserved(dev) / 2**30
+            parts.append(
+                f"VRAM {alloc:.1f}G alloc/{resv:.1f}G resv,"
+                f"{free_b / 2**30:.1f}G free/{total_b / 2**30:.1f}G"
+            )
+    except Exception:
+        pass
+    try:
+        import psutil
+
+        rss = psutil.Process().memory_info().rss / 2**30
+        vm = psutil.virtual_memory()
+        parts.append(
+            f"RSS {rss:.1f}G,sys {(vm.total - vm.available) / 2**30:.1f}/{vm.total / 2**30:.1f}G"
+        )
+    except Exception:
+        pass
+    return " | ".join(parts) if parts else "mem-stats-unavailable"
+
+
+def _video_latent_shape(samples) -> str:
+    try:
+        st = samples.get("samples")
+        t = st.tensors[0] if hasattr(st, "tensors") else st
+        return "x".join(str(int(s)) for s in t.shape)
+    except Exception:
+        return "?"
+
+
 def _unpack_node_output(out):
     if hasattr(out, "args"):
         args = out.args
@@ -353,6 +392,15 @@ def execute_director_plan_core(
         timeline_seg_total = len(all_segments)
     timeline_seg_total = max(timeline_seg_total, len(all_segments))
 
+    log.info(
+        "Executor START: canvas %dx%d @%.2ffps | run %d/%d segment(s) | audio=%s | "
+        "stream_export=%s | vram_clean=%s | continuity=%s",
+        int(plan.width), int(plan.height), float(plan.frame_rate or 24),
+        len(run_list), timeline_seg_total, audio_mode, stream_export,
+        vram_clean_mode, bool(plan.continuity_enabled),
+    )
+    log.info("Executor START memory: %s", mem_snapshot())
+
     output_chunks: list[torch.Tensor] = []
     output_pre_chunks: list[torch.Tensor] = []
     output_segments: list = []  # plans aligned 1:1 with output_chunks (skips omitted)
@@ -521,6 +569,11 @@ def execute_director_plan_core(
             "timeline_segment_index": ui_idx,
             "timeline_segment_total": timeline_seg_total,
         }
+        log.info(
+            "Segment %d/%d START: task=%s frames=%s | %s",
+            ui_idx + 1, timeline_seg_total, seg.task_key,
+            int(seg.frame_count or 0), mem_snapshot(),
+        )
 
         report_director_progress(
             node_id, segment_index=progress_index, segment_total=seg_total,
@@ -695,6 +748,13 @@ def execute_director_plan_core(
             raise ValueError("r2v/v2v/rv2v / reference conditioning requires audio_vae input.")
 
         # Always build via official MiniMaxH3ImageToVideo / ReferenceToVideo.
+        log.info(
+            "Seg #%d conditioning: ctx=%dx%d sample_len=%df ctx_n=%d "
+            "refs(img=%d vid=%d aud=%d vid_aud=%d)",
+            ui_idx + 1, ctx_w, ctx_h, sample_len, context_n,
+            len(ref_images or {}), len(ref_videos or {}),
+            len(ref_audios or {}), len(ref_video_audios or {}),
+        )
         positive, negative, latent, task_hint = run_minimax_conditioning(
             clip=clip,
             vae=vae,
@@ -710,6 +770,14 @@ def execute_director_plan_core(
             ref_videos=ref_videos,
             ref_video_audios=ref_video_audios,
             ref_audios=ref_audios,
+        )
+        try:
+            pos_tokens = int(positive[0][0].shape[1])
+        except Exception:
+            pos_tokens = -1
+        log.info(
+            "Seg #%d conditioning done: tokens=%d | %s",
+            ui_idx + 1, pos_tokens, mem_snapshot(),
         )
 
         trim_frames = 0
@@ -987,6 +1055,10 @@ def execute_director_plan_core(
                 ),
                 sigmas=first_pass_sigmas,
             )
+        log.info(
+            "Seg #%d sampling done: video_latent=%s | %s",
+            ui_idx + 1, _video_latent_shape(samples), mem_snapshot(),
+        )
 
         first_pass_gpu = None
         pre_export = None
@@ -1155,6 +1227,14 @@ def execute_director_plan_core(
         completed_outputs[seg.index] = chunk
         completed_pre_refine[seg.index] = pre_chunk
         completed_refine_passes[seg.index] = pass_clips
+        log.info(
+            "Seg #%d decoded+cached: export=%df audio=%s chunk=%.0fMB "
+            "av_latent_kept=%s | %s",
+            ui_idx + 1, int(chunk.shape[0]),
+            "yes" if isinstance(audio_dict, dict) and audio_dict.get("waveform") is not None else "no",
+            chunk.numel() * chunk.element_size() / 2**20,
+            seg.index in completed_av_latents, mem_snapshot(),
+        )
         # Pass frames are only read for the immediately-previous segment; drop older.
         _prune_completed_tensors(
             completed_refine_passes, keep=seg.index, label="refine pass frames"
@@ -1232,8 +1312,9 @@ def execute_director_plan_core(
             duration_ms=int(seg_elapsed * 1000),
         )
         log.info(
-            "MiniMax H3 Director segment %d/%d done (%d frames, task=%s)",
+            "MiniMax H3 Director segment %d/%d done (%d frames, task=%s, %.1fs) | %s",
             ui_idx + 1, timeline_seg_total, target_len, seg.task_key,
+            seg_elapsed, mem_snapshot(),
         )
         return chunk, audio_dict, pre_chunk
 
@@ -1244,18 +1325,21 @@ def execute_director_plan_core(
                 seg, progress_index=progress_pos[seg.index]
             )
             if stream_export:
-                # 流式导出：最终成片由磁盘缓存流式渲染，无需全片拼接。写完缓存后
-                # 只保留紧邻前一段的解码帧 / 音频（motion context 只读 prev_idx），
-                # 其余立即释放，避免全片解码帧常驻内存。
+                # 流式导出：每段完全独立。解码帧/音频/AV latent 一律不跨段驻留，
+                # 跨段需求（motion context pin、相位对齐回写）由磁盘缓存按需重读
+                # （resolve_prev_segment_output / load_segment_* 均有读盘回退）。
+                # 内存峰值恒定 = 模型权重 + 单个分段。
                 stream_frame_counts.append(int(chunk.shape[0]))
-                _prune_completed_tensors(
-                    completed_outputs, keep=seg.index, label="decoded outputs"
+                completed_outputs.clear()
+                completed_pre_refine.clear()
+                completed_refine_passes.clear()
+                completed_audios.clear()
+                completed_av_latents.clear()
+                completed_av_handoff.clear()
+                log.info(
+                    "Segment %d/%d state dropped (stream isolation) | %s",
+                    ui_idx + 1, timeline_seg_total, mem_snapshot(),
                 )
-                _prune_completed_tensors(
-                    completed_pre_refine, keep=seg.index, label="pre-refine outputs"
-                )
-                for idx in [i for i in completed_audios if i != seg.index]:
-                    del completed_audios[idx]
                 continue
 
             segment_outputs.append(chunk)
@@ -1396,7 +1480,7 @@ def execute_director_plan_core(
         else:
             export_audios.append({})
             missing_audio.append(seg.index + 1)
-    if missing_audio and plan.export_mode == "all":
+    if missing_audio and plan.export_mode == "all" and not stream_export:
         reports.append(
             "Audio cache missing for segment(s) "
             f"{missing_audio} — those slots are silent in the merge. "
@@ -1423,6 +1507,10 @@ def execute_director_plan_core(
         import time as _time
         cache_dir = _os.path.join(
             _fp.get_output_directory(), "minimax_seg_cache", str(node_id))
+        log.info(
+            "Stream export START: mode=%s cache_dir=%s | %s",
+            plan.export_mode, cache_dir, mem_snapshot(),
+        )
         ts = _time.strftime("%Y%m%d_%H%M%S")
         _os.makedirs(_os.path.join(_fp.get_output_directory(), "video"), exist_ok=True)
         if plan.export_mode == "segments":
