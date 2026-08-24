@@ -8572,7 +8572,7 @@ class MiniMaxH3DirectorEditor {
             const x1 = this.frameToX(seg.start + seg.length, width);
             const pxW = x1 - x0;
             const sel = showSegSel && i === this.selectedIndex;
-            const running = i === this._runHighlightSeg;
+            const running = !!this.runStatusEl?.classList.contains("active") && i === this._runHighlightSeg;
             const runOn = this.isSegmentRunEnabled(i);
             const fl2vStart = !this.isFl2vMode() || !!seg.isStartFrame;
             const visualRank = this._visualRankFromArrayIndex(i);
@@ -10852,7 +10852,13 @@ app.registerExtension({
         });
 
         api.addEventListener("executing", ({ detail }) => {
-            if (detail == null) return;
+            // null = execution finished/stopped. Without this, an interrupted run
+            // leaves _runHighlightSeq stuck: the old group stays highlighted and
+            // follow-mode keeps showing it no matter what the user clicks.
+            if (detail == null) {
+                clearAllDirectorRunStatus();
+                return;
+            }
             const node = findDirectorNode(detail);
             const editor = node?._minimaxEditor;
             if (!editor) return;
@@ -10892,6 +10898,10 @@ app.registerExtension({
             if (node?._minimaxEditor) {
                 node._minimaxEditor.setRunError(detail?.exception_message || t("executing.error"));
             }
+        });
+
+        api.addEventListener("execution_interrupted", () => {
+            clearAllDirectorRunStatus();
         });
 
         patchDirectorDomWidgetLayout();

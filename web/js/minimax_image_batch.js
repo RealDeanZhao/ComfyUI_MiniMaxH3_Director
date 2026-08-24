@@ -2072,7 +2072,11 @@ function patchBatchCardClasses(editor) {
     const cards = list.querySelectorAll(".bd-batch-card");
     if (cards.length !== editor.timeline.segments.length) return false;
     const runSelectOn = !!(editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.());
-    const runningIdx = editor._runHighlightSeg;
+    // Only honor the run highlight while a run is actually active — a stale
+    // index (interrupted run) would otherwise pin follow-mode to the wrong card.
+    const runningIdx = editor.runStatusEl?.classList.contains("active")
+        ? editor._runHighlightSeg
+        : -1;
     cards.forEach((card, i) => {
         const seg = editor.timeline.segments[i];
         const runEnabled = !runSelectOn || !!editor.isSegmentRunEnabled?.(i);
@@ -2134,7 +2138,9 @@ export function renderImageBatchGroups(editor, { lightweight = false } = {}) {
     const key = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
     const variant = imageBatchVariant(key);
     const isVideo = isVideoBatchTask(key);
-    const runningIdx = editor._runHighlightSeg;
+    const runningIdx = editor.runStatusEl?.classList.contains("active")
+        ? editor._runHighlightSeg
+        : -1;
     const fps = parseFloat(editor.frameRateWidget?.value || editor.timeline?.frameRate || 24);
 
     if (editor.batchHint) {
@@ -2564,7 +2570,9 @@ export function applyBatchFollowVisibility(editor) {
     const follow = !!editor.batchFollowSeg;
     const cards = list.querySelectorAll(".bd-batch-card");
     const n = cards.length;
-    const running = Number(editor._runHighlightSeg ?? -1);
+    const running = editor.runStatusEl?.classList.contains("active")
+        ? Number(editor._runHighlightSeg ?? -1)
+        : -1;
     const focus = (running >= 0 && running < n) ? running : (editor.selectedIndex ?? 0);
     cards.forEach((card, i) => {
         card.style.display = (follow && i !== focus) ? "none" : "";

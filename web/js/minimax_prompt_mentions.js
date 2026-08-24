@@ -765,12 +765,24 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         },
     };
 
+    // Chips created while the media list is still settling render as is-missing
+    // (dimmed) and only recovered on the next click/blur — re-check shortly after
+    // paste/hydration so pasted <Picture N> prompts turn solid without interaction.
+    let delayedRefreshTimers = [];
+    const scheduleDelayedMediaRefresh = () => {
+        for (const t of delayedRefreshTimers) clearTimeout(t);
+        delayedRefreshTimers = [300, 1000, 2500].map((delay) =>
+            setTimeout(() => refreshTokenStates(rich, getMedia), delay),
+        );
+    };
+
     const hydrateFromValue = (value) => {
         const caret = document.activeElement === rich ? serializedCaretOffset(rich) : null;
         hydrateTokenEditor(rich, value, getMedia, chipOpts);
         if (caret != null && document.activeElement === rich) {
             setCaretBySerializedOffset(rich, caret);
         }
+        scheduleDelayedMediaRefresh();
     };
 
     hydrateFromValue(textarea.value || "");
@@ -953,6 +965,7 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         const text = (e.clipboardData || window.clipboardData)?.getData("text/plain") || "";
         insertAtCaret(rich, text.replace(/\r\n/g, "\n"), getMedia, chipOpts);
         syncToTextarea({ emitInput: true });
+        scheduleDelayedMediaRefresh();
         openIfMention();
     });
 
