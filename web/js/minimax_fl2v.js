@@ -37,12 +37,14 @@ export const FL2V_STYLES = `
 .bd-fl2v-shot.selected{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
 .bd-fl2v-shot.shot-dragging{opacity:.4}
 .bd-fl2v-shot.shot-drag-over{border-color:#5ec8ff;box-shadow:0 0 0 1px rgba(94,200,255,.45)}
-.bd-fl2v-shot-head{display:flex;align-items:center;justify-content:space-between;gap:6px;cursor:grab;user-select:none}
-.bd-fl2v-shot-head:active{cursor:grabbing}
+.bd-fl2v-shot-head{display:flex;align-items:center;justify-content:space-between;gap:6px;cursor:default;user-select:none}
+.bd-fl2v-shot-drag{display:flex;align-items:center;flex:1;min-width:0;cursor:grab}
+.bd-fl2v-shot-drag:active{cursor:grabbing}
 .bd-fl2v-shot-head b{color:#ccc;font-size:12px}
-.bd-fl2v-continuity{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#9ab;cursor:pointer;user-select:none;margin-left:auto;margin-right:8px}
-.bd-fl2v-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff}
-.bd-fl2v-shot-meta{color:#888;font-size:10px}
+.bd-fl2v-shot-cont{display:flex;align-items:center;position:relative;z-index:2}
+.bd-fl2v-continuity{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#9ab;cursor:pointer;user-select:none;-webkit-user-drag:none}
+.bd-fl2v-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff;pointer-events:auto;-webkit-user-drag:none}
+.bd-fl2v-shot-meta{color:#888;font-size:10px;flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bd-fl2v-slots{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .bd-fl2v-slot-wrap{position:relative;min-width:0}
 .bd-fl2v-slot{position:relative;aspect-ratio:var(--fl2v-slot-ar,16/9);border:1px dashed #555;border-radius:4px;background:#111;overflow:hidden;display:flex;align-items:center;justify-content:center;cursor:pointer}
@@ -63,8 +65,10 @@ export const FL2V_STYLES = `
 .bd-fl2v-slot-wrap:focus-within .x{display:flex}
 @media (hover:none){.bd-fl2v-slot-wrap.has-img .x{display:flex}}
 .bd-fl2v-slot-wrap .x:hover{background:rgba(160,30,30,.95);color:#fff}
-.bd-fl2v-shot-row{display:flex;align-items:center;gap:6px;color:#ddd;font-size:11px}
+.bd-fl2v-shot-foot{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.bd-fl2v-shot-row{display:flex;align-items:center;gap:6px;color:#ddd;font-size:11px;min-width:0}
 .bd-fl2v-shot-row input{width:56px}
+.bd-fl2v-shot-foot .bd-r2v-pick-existing{flex-shrink:0;cursor:pointer}
 .bd-fl2v-detail{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:10px}
 .bd-fl2v-detail.hidden{display:none!important}
 .bd-fl2v-detail-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:0 0 auto}
@@ -162,7 +166,7 @@ export function newFl2vShot(overrides = {}) {
         ? Number(overrides.durationSec)
         : defaultDurationSec("fl2v");
     durationSec = clamp(roundDurationSec(durationSec), minDurationSec(), maxDurationSec());
-    return {
+    const shot = {
         id: overrides.id || uid(),
         durationSec,
         prompt: overrides.prompt || "",
@@ -173,6 +177,12 @@ export function newFl2vShot(overrides = {}) {
             ? { externalNodeId: overrides.externalNodeId }
             : {}),
     };
+    // Must survive syncFl2vFromShots → newFl2vShot(); dropping it made 引用上段
+    // appear stuck (commit rebuilt shots and defaulted back to on).
+    if (overrides.continuityFromPrev != null || overrides.continuity_from_prev != null) {
+        shot.continuityFromPrev = overrides.continuityFromPrev ?? overrides.continuity_from_prev;
+    }
+    return shot;
 }
 
 function shotFrameCount(shot, fps = 24) {
@@ -256,6 +266,7 @@ export function migrateLegacyFl2vToShots(timeline) {
             negativePrompt: s.negativePrompt || DEFAULT_FL2V_NEGATIVE,
             startImage,
             endImage,
+            continuityFromPrev: s.continuityFromPrev ?? s.continuity_from_prev,
         }));
     }
     return shots;
@@ -278,7 +289,7 @@ export function flattenFl2vShotsToSegments(editor) {
             durationSec: shot.durationSec,
             prompt: shot.prompt || "",
             negativePrompt: shot.negativePrompt || DEFAULT_FL2V_NEGATIVE,
-            continuityFromPrev: shot.continuityFromPrev,
+            continuityFromPrev: isSegmentContinuityFromPrev(shot, i),
             taskType: "",
             refs: [],
             // Do not mark start when end-only — canvas badges / thumbs key off these.
@@ -846,14 +857,12 @@ export function swapFl2vShots(editor, fromIndex, toIndex) {
 }
 
 function bindFl2vShotCardDnD(editor, cardEl, shotIndex) {
-    // Only the header is draggable so slot/clear clicks are never stolen by card DnD.
+    // Drag only the title — never the checkbox row. Nearby draggable=true
+    // swallows 引用上段 clicks on Windows.
     cardEl.draggable = false;
-    const handle = cardEl.querySelector(".bd-fl2v-shot-head");
-    if (handle) {
-        handle.draggable = true;
-        handle.title = t("tooltip.fl2vDragHandle");
-        handle.style.cursor = "grab";
-        handle.addEventListener("dragstart", (e) => {
+    const handles = cardEl.querySelectorAll(".bd-fl2v-shot-drag");
+    if (handles.length) {
+        const onDragStart = (e) => {
             editor._fl2vShotDrag = true;
             editor._fl2vShotDragFrom = shotIndex;
             const payload = JSON.stringify({ shotIndex });
@@ -865,13 +874,19 @@ function bindFl2vShotCardDnD(editor, cardEl, shotIndex) {
             } catch (_) { /* ignore */ }
             cardEl.classList.add("shot-dragging");
             e.stopPropagation();
-        });
-        handle.addEventListener("dragend", () => {
+        };
+        const onDragEnd = () => {
             cardEl.classList.remove("shot-dragging");
             editor._fl2vShotDragFrom = null;
             editor.fl2vUi?.shotsEl?.querySelectorAll(".bd-fl2v-shot.shot-drag-over")
                 .forEach((el) => el.classList.remove("shot-drag-over"));
             setTimeout(() => { editor._fl2vShotDrag = false; }, 0);
+        };
+        handles.forEach((handle) => {
+            handle.draggable = true;
+            handle.title = t("tooltip.fl2vDragHandle");
+            handle.addEventListener("dragstart", onDragStart);
+            handle.addEventListener("dragend", onDragEnd);
         });
     }
 
@@ -946,6 +961,39 @@ function setFl2vSlotImage(shot, slot, ref) {
     if (!shot) return;
     if (slot === "end") shot.endImage = ref;
     else shot.startImage = ref;
+}
+
+async function pickFl2vSlotImage(editor, shotIndex, slotKind) {
+    const shots = editor.timeline?.shots || [];
+    const shot = shots[shotIndex];
+    const currentValue = slotKind === "end"
+        ? (shot?.endImage?.imageFile || "")
+        : (shot?.startImage?.imageFile || "");
+    const picked = await editor.chooseImageInput({
+        title: t("mediaPicker.pickFl2vImage"),
+        currentValue,
+    });
+    if (!picked?.imageFile) return false;
+    let liveShot = shots[shotIndex];
+    if (!liveShot) {
+        addFl2vShot(editor);
+        liveShot = editor.timeline?.shots?.[editor.timeline.shots.length - 1];
+        editor.selectedIndex = (editor.timeline?.shots?.length || 1) - 1;
+    }
+    if (!liveShot) return false;
+    setFl2vSlotImage(liveShot, slotKind, {
+        imageFile: picked.imageFile,
+        width: picked.width || 0,
+        height: picked.height || 0,
+    });
+    syncFl2vFromShots(editor);
+    editor.selectedIndex = Math.min(shotIndex, Math.max(0, (editor.timeline?.shots?.length || 1) - 1));
+    editor.commit?.(false, { syncTimeline: true });
+    updateFl2vDetailUI(editor);
+    editor.updateVideoNameLabel?.();
+    editor.scheduleRender?.();
+    editor.updateDomWidgetHeight?.();
+    return true;
 }
 
 /** Same group: swap/move; cross group: copy/replace target. */
@@ -1097,10 +1145,10 @@ function renderFl2vShotCards(editor) {
         const contChecked = isSegmentContinuityFromPrev(shot, i);
         card.innerHTML = `
             <div class="bd-fl2v-shot-head">
-                <b>${t("panel.fl2v.shotN", { n: i + 1 })}</b>
-                ${showCont ? `<label class="bd-fl2v-continuity" title="${t("tooltip.segmentContinuityFromPrev")}"><input type="checkbox" data-r="shot-continuity" ${contChecked ? "checked" : ""}><span>${t("batch.continuityFromPrev")}</span></label>` : ""}
+                <span class="bd-fl2v-shot-drag"><b>${t("panel.fl2v.shotN", { n: i + 1 })}</b></span>
                 <span class="bd-fl2v-shot-meta">${badge} · ${fc}f</span>
             </div>
+            ${showCont ? `<div class="bd-fl2v-shot-cont"><label class="bd-fl2v-continuity" draggable="false" title="${t("tooltip.segmentContinuityFromPrev")}"><input type="checkbox" data-r="shot-continuity" ${contChecked ? "checked" : ""}><span>${t("batch.continuityFromPrev")}</span></label></div>` : ""}
             <div class="bd-fl2v-slots">
                 <div class="bd-fl2v-slot-wrap${startUrl ? " has-img" : ""}">
                     <div class="bd-fl2v-slot${startUrl ? " has-img" : ""}" data-slot="start" title="${t("tooltip.fl2vStartSlot")}">
@@ -1117,14 +1165,17 @@ function renderFl2vShotCards(editor) {
                     ${endUrl ? `<button type="button" class="x" data-clear="end" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
                 </div>
             </div>
-            <label class="bd-fl2v-shot-row" title="${t("tooltip.fl2vShotDuration")}">
-                ${t("panel.fl2v.duration")}
-                <input type="number" class="bd-num" data-r="shot-sec" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${shot.durationSec}">
-                ${t("panel.fl2v.seconds")}
-            </label>
+            <div class="bd-fl2v-shot-foot">
+                <label class="bd-fl2v-shot-row" title="${t("tooltip.fl2vShotDuration")}">
+                    ${t("panel.fl2v.duration")}
+                    <input type="number" class="bd-num" data-r="shot-sec" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${shot.durationSec}">
+                    ${t("panel.fl2v.seconds")}
+                </label>
+                <button type="button" class="bd-r2v-pick-existing" data-a="fl2v-pick-existing" title="${t("mediaPicker.pickExistingHint")}">${t("mediaPicker.pickExisting")}</button>
+            </div>
         `;
         card.addEventListener("click", (e) => {
-            if (e.target.closest("[data-slot], [data-clear], input, .bd-fl2v-slot-wrap, .bd-fl2v-continuity")) return;
+            if (e.target.closest("[data-slot], [data-clear], input, .bd-fl2v-slot-wrap, .bd-fl2v-continuity, .bd-fl2v-shot-cont, [data-a='fl2v-pick-existing']")) return;
             if (editor._fl2vShotDrag || editor._fl2vSlotDrag) return;
             if (editor.selectedIndex !== i) flushFl2vPromptDraft(editor);
             editor.selectedIndex = i;
@@ -1133,18 +1184,52 @@ function renderFl2vShotCards(editor) {
         });
         const contInput = card.querySelector('[data-r="shot-continuity"]');
         if (contInput) {
-            contInput.addEventListener("click", (e) => e.stopPropagation());
-            contInput.addEventListener("change", (e) => {
-                e.stopPropagation();
-                shot.continuityFromPrev = !!contInput.checked;
-                // Keep derived segments[] in sync when present.
+            const applyCont = (enabled) => {
+                contInput.checked = !!enabled;
+                shot.continuityFromPrev = !!enabled;
                 if (Array.isArray(editor.timeline?.segments) && editor.timeline.segments[i]) {
-                    editor.timeline.segments[i].continuityFromPrev = !!contInput.checked;
+                    editor.timeline.segments[i].continuityFromPrev = !!enabled;
                 }
-                editor.commit?.(true);
+                // Do not commit() here: that rebuilds every shot card and eats the click.
+                editor.scheduleTimelineSync?.();
+                editor.scheduleRender?.();
+            };
+            const contLabel = contInput.closest("label");
+            // Same as slot clear: click is unreliable next to HTML5 drag sources.
+            const onToggle = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                applyCont(!contInput.checked);
+            };
+            contLabel?.addEventListener("pointerdown", onToggle);
+            // Swallow the leftover click so the native checkbox does not toggle back.
+            contLabel?.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            contInput.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
             });
         }
         bindFl2vShotCardDnD(editor, card, i);
+        const pickBtn = card.querySelector('[data-a="fl2v-pick-existing"]');
+        if (pickBtn) {
+            const bothFilled = !!(shot.startImage?.imageFile && shot.endImage?.imageFile);
+            pickBtn.disabled = bothFilled;
+            pickBtn.title = bothFilled ? t("mediaPicker.slotsFull") : t("mediaPicker.pickExistingHint");
+            pickBtn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                if (editor.selectedIndex !== i) flushFl2vPromptDraft(editor);
+                editor.selectedIndex = i;
+                const kind = shot.startImage?.imageFile ? "end" : "start";
+                try {
+                    await pickFl2vSlotImage(editor, i, kind);
+                } catch (err) {
+                    console.error("[MiniMax H3Director] fl2v pick failed:", err);
+                }
+            });
+        }
         card.querySelectorAll("[data-slot]").forEach((slot) => {
             const kind = slot.dataset.slot;
             bindFl2vSlotDnD(editor, slot, i, kind);
@@ -1418,7 +1503,7 @@ export function bindFl2vEvents(editor) {
             const shot = promptTargetShot();
             if (!shot) return;
             shot[field] = el.value || "";
-            editor.scheduleRender();
+            editor._schedulePromptRender();
         });
         el.addEventListener("focus", () => {
             if (!Number.isFinite(editor._fl2vPromptSegIndex)) {

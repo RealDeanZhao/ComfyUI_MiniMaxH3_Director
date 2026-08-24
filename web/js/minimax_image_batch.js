@@ -475,15 +475,20 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-del{background:transparent;border:1px solid #553;color:#f88;border-radius:4px;padding:3px 8px;font-size:10px;cursor:pointer}
 .bd-batch-r2v .bd-batch-del{border-radius:8px;padding:5px 10px;font-size:11px;border-color:#4a3030;color:#f0a0a0}
 .bd-batch-del:hover{background:#3a1515}
-.bd-batch-media{display:flex;flex-direction:column;gap:4px;min-width:88px;max-width:120px}
+.bd-batch-media{display:flex;flex-direction:column;gap:4px;min-width:88px;max-width:140px}
+.bd-batch-media .bd-r2v-pick-existing{align-self:stretch;text-align:center}
 /* Left = assets (narrower) · Right = prompt + preview (wider) */
 .bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:stretch;min-height:420px;flex:1 1 auto}
 .bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0}
 .bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:380px;flex:1 1 auto}
 .bd-r2v-section{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0;box-sizing:border-box}
-.bd-r2v-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
-.bd-r2v-section-title{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#eaeaea}
+.bd-r2v-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.bd-r2v-section-title{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#eaeaea;min-width:0}
+.bd-r2v-section-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
 .bd-r2v-section-count{font-size:11px;color:#7d7d7d;font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.bd-r2v-pick-existing{background:transparent;border:1px solid #3a3a3a;color:#c8c8c8;border-radius:6px;padding:2px 8px;font-size:10px;cursor:pointer;line-height:1.4;white-space:nowrap}
+.bd-r2v-pick-existing:hover{border-color:#4fff8f;color:#4fff8f}
+.bd-r2v-pick-existing:disabled{opacity:.4;cursor:not-allowed;border-color:#333;color:#666}
 .bd-r2v-common-inherit{border-style:dashed;border-color:#3a4a5a;background:#0a1218}
 .bd-r2v-common-inherit .bd-r2v-section-title{color:#9ab;text-transform:none;letter-spacing:.02em;font-size:11px}
 .bd-r2v-common-inherit .bd-batch-ref{cursor:default;border-color:#2a3a4a}
@@ -918,6 +923,20 @@ function pickFile(accept, onFile) {
     input.click();
 }
 
+function applySegSourceImage(editor, index, imageFile, width = 0, height = 0) {
+    const segId = editor.timeline.segments[index]?.id;
+    const seg = (editor.timeline.segments || []).find((s) => s.id === segId)
+        || editor.timeline.segments[index];
+    if (!seg) return;
+    seg.genImage = { imageFile, width: width || 0, height: height || 0 };
+    seg.imageFile = imageFile;
+    editor.renderImageBatchGroups();
+    editor.updateOutputPreview?.();
+    editor.commit(false, { syncTimeline: true });
+    editor.scheduleRender?.();
+    editor.scheduleTimelineSync?.();
+}
+
 async function uploadSegSource(editor, index) {
     const segId = editor.timeline.segments[index]?.id;
     pickFile("image/*,.jpg,.jpeg,.png,.webp,.bmp,.gif", async (file) => {
@@ -928,21 +947,11 @@ async function uploadSegSource(editor, index) {
             const uploaded = await uploadImage(file);
             const imageFile = relPath(uploaded);
             if (!imageFile) throw new Error("Upload returned empty filename");
-            // Resolve by id — normalize may replace segment object references.
-            const seg = (editor.timeline.segments || []).find((s) => s.id === segId)
-                || editor.timeline.segments[index];
-            if (!seg) return;
-            // Write genImage immediately so UI updates even if dimension probe fails/hangs.
-            seg.genImage = { imageFile, width: 0, height: 0 };
-            seg.imageFile = imageFile;
-            editor.renderImageBatchGroups();
-            editor.updateOutputPreview?.();
-            editor.commit(false, { syncTimeline: true });
-            editor.scheduleRender?.();
+            applySegSourceImage(editor, index, imageFile, 0, 0);
             try {
                 const dims = await readImageDimensions(file);
-                const live = (editor.timeline.segments || []).find((s) => s.id === seg.id) || seg;
-                if (live.genImage?.imageFile === imageFile) {
+                const live = (editor.timeline.segments || []).find((s) => s.id === segId) || editor.timeline.segments[index];
+                if (live?.genImage?.imageFile === imageFile) {
                     live.genImage = { imageFile, width: dims.width, height: dims.height };
                     editor.updateOutputPreview?.();
                     editor.scheduleTimelineSync?.();
@@ -955,6 +964,20 @@ async function uploadSegSource(editor, index) {
             alert(t("upload.alertFailed", { err: err?.message || err }));
         }
     });
+}
+
+async function pickExistingSegSource(editor, index) {
+    try {
+        const picked = await editor.chooseImageInput({
+            title: t("mediaPicker.pickSourceImage"),
+            currentValue: editor.timeline.segments[index]?.genImage?.imageFile || "",
+        });
+        if (!picked?.imageFile) return;
+        applySegSourceImage(editor, index, picked.imageFile, picked.width, picked.height);
+    } catch (err) {
+        console.error("[MiniMax H3Director] batch source pick failed:", err);
+        alert(t("upload.alertFailed", { err: err?.message || err }));
+    }
 }
 
 function readImageDimensions(file) {
@@ -990,6 +1013,35 @@ async function assignSegRefFromFile(editor, index, slot, file) {
 
 async function uploadSegRef(editor, index, slot) {
     pickFile("image/*", (file) => assignSegRefFromFile(editor, index, slot, file));
+}
+
+async function assignSegRefFromPicked(editor, index, slot, picked) {
+    if (!picked?.imageFile) return;
+    const seg = editor.timeline.segments[index];
+    if (!seg) return;
+    seg.refs = (seg.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+    seg.refs.push({ index: slot, imageFile: picked.imageFile, imageB64: "" });
+    editor.renderImageBatchGroups();
+    editor.commit();
+}
+
+async function pickExistingSegRef(editor, index, offset, slots) {
+    const seg = editor.timeline.segments[index];
+    if (!seg) return;
+    const slot = nextEmptyGroupSlot(seg.refs, offset, slots, (r) => r?.imageFile || r?.imageB64);
+    if (slot < 0) {
+        alert(t("mediaPicker.slotsFull"));
+        return;
+    }
+    try {
+        const picked = await editor.chooseImageInput({
+            title: t("mediaPicker.pickReferenceImage"),
+        });
+        await assignSegRefFromPicked(editor, index, slot, picked);
+    } catch (err) {
+        console.error("[MiniMax H3Director] batch ref pick failed:", err);
+        alert(t("upload.alertFailed", { err: err?.message || err }));
+    }
 }
 
 function moveBatchRefSlot(editor, segIndex, fromSlot, toSlot) {
@@ -1119,6 +1171,68 @@ async function uploadSegVideo(editor, index, slot) {
     });
 }
 
+async function pickExistingSegVideo(editor, index, offset, slots) {
+    const seg = editor.timeline.segments[index];
+    if (!seg) return;
+    const slot = nextEmptyGroupSlot(seg.refVideos, offset, slots, (r) => r?.videoFile || r?.fileName);
+    if (slot < 0) {
+        alert(t("mediaPicker.slotsFull"));
+        return;
+    }
+    try {
+        const picked = await editor.chooseVideoInput({
+            title: t("mediaPicker.pickReferenceVideo"),
+        });
+        if (!picked?.relPath) return;
+        const live = editor.timeline.segments[index];
+        if (!live) return;
+        live.refVideos = (live.refVideos || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+        live.refVideos.push({
+            index: slot,
+            videoFile: picked.relPath,
+            fileName: picked.fileName || picked.relPath,
+            type: picked.type || "input",
+            subfolder: picked.subfolder || "",
+        });
+        editor.renderImageBatchGroups();
+        editor.commit();
+    } catch (err) {
+        console.error("[MiniMax H3Director] batch video pick failed:", err);
+        alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
+    }
+}
+
+async function pickExistingSegAudio(editor, index, offset, slots) {
+    const seg = editor.timeline.segments[index];
+    if (!seg) return;
+    const slot = nextEmptyGroupSlot(seg.refAudios, offset, slots, (r) => r?.audioFile || r?.fileName);
+    if (slot < 0) {
+        alert(t("mediaPicker.slotsFull"));
+        return;
+    }
+    try {
+        const picked = await editor.chooseAudioInput({
+            title: t("mediaPicker.pickReferenceAudio"),
+        });
+        if (!picked?.relPath) return;
+        const live = editor.timeline.segments[index];
+        if (!live) return;
+        live.refAudios = (live.refAudios || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+        live.refAudios.push({
+            index: slot,
+            audioFile: picked.relPath,
+            fileName: picked.fileName || picked.relPath,
+            type: picked.type || "input",
+            subfolder: picked.subfolder || "",
+        });
+        editor.renderImageBatchGroups();
+        editor.commit();
+    } catch (err) {
+        console.error("[MiniMax H3Director] batch audio pick failed:", err);
+        alert(t("upload.refAudioFailed", { err: err?.message || err }));
+    }
+}
+
 function removeSegVideo(editor, index, slot) {
     const seg = editor.timeline.segments[index];
     if (!seg) return;
@@ -1172,14 +1286,45 @@ function countFilledRefs(seg, { picOffset = 0, audOffset = 0, vidOffset = 0 } = 
     return { imgs, videos, audios };
 }
 
-function createR2vSection(title, countText) {
+function nextEmptyGroupSlot(items, offset, slots, hasFn) {
+    for (let local = 0; local < slots; local++) {
+        const abs = offset + local;
+        const hit = (items || []).find((r) => Number(r.index ?? r.slot) === abs);
+        if (!hasFn(hit)) return abs;
+    }
+    return -1;
+}
+
+function createR2vSection(title, countText, { onPickExisting, pickDisabled = false } = {}) {
     const section = document.createElement("div");
     section.className = "bd-r2v-section";
     const head = document.createElement("div");
     head.className = "bd-r2v-section-head";
-    head.innerHTML = `
-        <span class="bd-r2v-section-title">${title}</span>
-        <span class="bd-r2v-section-count">${countText}</span>`;
+    const titleEl = document.createElement("span");
+    titleEl.className = "bd-r2v-section-title";
+    titleEl.textContent = title;
+    const actions = document.createElement("span");
+    actions.className = "bd-r2v-section-actions";
+    if (onPickExisting) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "bd-r2v-pick-existing";
+        btn.textContent = t("mediaPicker.pickExisting");
+        btn.title = pickDisabled ? t("mediaPicker.slotsFull") : t("mediaPicker.pickExistingHint");
+        btn.disabled = !!pickDisabled;
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            if (btn.disabled) return;
+            void onPickExisting();
+        };
+        actions.appendChild(btn);
+    }
+    const countEl = document.createElement("span");
+    countEl.className = "bd-r2v-section-count";
+    countEl.textContent = countText;
+    actions.appendChild(countEl);
+    head.appendChild(titleEl);
+    head.appendChild(actions);
     section.appendChild(head);
     return section;
 }
@@ -1438,6 +1583,12 @@ function appendR2vMediaSections(card, seg, index, editor) {
     const imgSection = createR2vSection(
         groupPicTitle,
         picSlots > 0 ? `${counts.imgs}/${picSlots}` : "0/0",
+        picSlots > 0
+            ? {
+                onPickExisting: () => pickExistingSegRef(editor, index, picOffset, picSlots),
+                pickDisabled: counts.imgs >= picSlots,
+            }
+            : {},
     );
     if (picOffset > 0) {
         const hint = document.createElement("p");
@@ -1566,6 +1717,12 @@ function appendR2vMediaSections(card, seg, index, editor) {
     const videoSection = createR2vSection(
         groupVidTitle,
         vidSlots > 0 ? `${counts.videos}/${vidSlots}` : "0/0",
+        vidSlots > 0
+            ? {
+                onPickExisting: () => pickExistingSegVideo(editor, index, vidOffset, vidSlots),
+                pickDisabled: counts.videos >= vidSlots,
+            }
+            : {},
     );
     const videos = document.createElement("div");
     videos.className = "bd-batch-videos";
@@ -1600,6 +1757,12 @@ function appendR2vMediaSections(card, seg, index, editor) {
     const audioSection = createR2vSection(
         groupAudTitle,
         audSlots > 0 ? `${counts.audios}/${audSlots}` : "0/0",
+        audSlots > 0
+            ? {
+                onPickExisting: () => pickExistingSegAudio(editor, index, audOffset, audSlots),
+                pickDisabled: counts.audios >= audSlots,
+            }
+            : {},
     );
     const audios = document.createElement("div");
     audios.className = "bd-batch-audios";
@@ -2268,6 +2431,16 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             renderSourceSlot(src, seg.genImage?.imageFile);
             src.onclick = () => uploadSegSource(editor, index);
             media.appendChild(src);
+            const pickSrc = document.createElement("button");
+            pickSrc.type = "button";
+            pickSrc.className = "bd-r2v-pick-existing";
+            pickSrc.textContent = t("mediaPicker.pickExisting");
+            pickSrc.title = t("mediaPicker.pickExistingHint");
+            pickSrc.onclick = (e) => {
+                e.stopPropagation();
+                void pickExistingSegSource(editor, index);
+            };
+            media.appendChild(pickSrc);
             card.appendChild(media);
         }
         let r2vMain = null;
@@ -2779,6 +2952,7 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
 export function setToolbarDisabledForBatch(editor, disabled) {
     const btns = [
         editor.btnVideo,
+        editor.btnVideoExisting,
         editor.btnVideoAppend,
         editor.root?.querySelector('[data-a="split"]'),
         editor.root?.querySelector('[data-a="smart-split"]'),
@@ -2807,6 +2981,7 @@ export function setToolbarDisabledForBatch(editor, disabled) {
 export function setR2vToolbar(editor, enabled) {
     const hide = [
         editor.btnVideo,
+        editor.btnVideoExisting,
         editor.btnVideoAppend,
         editor.root?.querySelector('[data-a="split"]'),
         editor.root?.querySelector('[data-a="smart-split"]'),

@@ -580,7 +580,9 @@ const STYLES = `
 .bd-wrap.bd-batch-fill .bd-run-status{flex:0 0 auto;margin-top:0;flex-shrink:0}
 /* Fixed min so progress text wrap does not change node chrome height every tick. */
 .bd-run-status{min-height:52px;box-sizing:border-box}
-/* Solo material group (class set by syncBatchPanelFillHeight): card fills the list. */
+/* Solo material group fills the viewport by default, but may grow beyond it when
+   the user drags the rich prompt editor. The list then scrolls instead of
+   clipping the editor or forcing its height back to auto. */
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card{flex:1 1 auto;min-height:0;align-self:stretch}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-r2v{display:flex;flex-direction:column}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{flex:1 1 auto;min-height:280px;align-self:stretch}
@@ -589,6 +591,7 @@ const STYLES = `
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{
   flex:1 1 auto;min-height:120px;overflow:auto
+}
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source,
@@ -616,6 +619,17 @@ const STYLES = `
 .bd-modal-item:hover{background:#252525;color:#eee}
 .bd-modal-item.selected{background:#2a2a2a;border-color:#4fff8f;color:#fff}
 .bd-modal-actions{display:flex;gap:8px;justify-content:flex-end;flex-shrink:0}
+.bd-media-toolbar{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.bd-media-status{color:#999;font-size:11px;line-height:1.4;min-height:15px}
+.bd-media-modal{max-width:820px}
+.bd-media-body{display:grid;grid-template-columns:minmax(260px,1fr) minmax(280px,.92fr);gap:10px;min-height:280px}
+.bd-media-left,.bd-media-right{display:flex;flex-direction:column;gap:8px;min-width:0}
+.bd-media-select{width:100%;min-height:220px;max-height:320px;background:#141414;border:1px solid #333;border-radius:6px;color:#eee;padding:6px;font-size:11px;box-sizing:border-box;flex:1}
+.bd-media-select option{padding:4px 6px}
+.bd-media-preview{flex:1;min-height:220px;background:#111;border:1px solid #333;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+.bd-media-preview img,.bd-media-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}
+.bd-media-preview-empty{padding:18px;color:#666;font-size:11px;line-height:1.45;text-align:center}
+.bd-media-meta{display:flex;flex-direction:column;gap:4px;color:#9a9a9a;font-size:10px;line-height:1.45;word-break:break-all}
 .bd-toolbar-wrap{display:flex;flex-direction:column;gap:4px;width:100%}
 .bd-toolbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;width:100%}
 .bd-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex:1;min-width:0}
@@ -845,8 +859,13 @@ const STYLES = `
 .bd-rv2v-layout .bd-ref-audio:hover .x,.bd-rv2v-layout .bd-ref-video:hover .x{display:flex}
 .bd-rv2v-layout .bd-refs-images-wrap.bd-r2v-section,.bd-rv2v-layout .bd-ref-audios-wrap.bd-r2v-section,.bd-rv2v-layout .bd-ref-videos-wrap.bd-r2v-section{display:flex;flex-direction:column;gap:8px}
 .bd-r2v-section-count:empty{display:none}
+.bd-r2v-section-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.bd-r2v-pick-existing{background:transparent;border:1px solid #3a3a3a;color:#c8c8c8;border-radius:6px;padding:2px 8px;font-size:10px;cursor:pointer;line-height:1.4;white-space:nowrap}
+.bd-r2v-pick-existing:hover{border-color:#4fff8f;color:#4fff8f}
+.bd-r2v-pick-existing:disabled{opacity:.4;cursor:not-allowed;border-color:#333;color:#666}
 .bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-section-head{display:contents}
-.bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-section-count{display:none}
+.bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-section-count,
+.bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-pick-existing{display:none}
 .bd-continuous-ref{display:flex;align-items:center;gap:6px;font-size:10px;color:#aaa;user-select:none;margin-left:8px}
 .bd-continuous-ref label{display:flex;align-items:center;gap:4px;cursor:pointer}
 .bd-continuous-ref input[type="checkbox"]{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
@@ -860,6 +879,8 @@ ${FL2V_STYLES}
 .bd-ref{max-height:64px}
 .bd-rv2v-layout .bd-ref{max-height:none}
 .bd-v2v-layout .bd-prompt,.bd-rv2v-layout .bd-prompt{min-height:140px}
+.bd-media-body{grid-template-columns:1fr}
+.bd-media-preview{min-height:180px}
 }
 `;
 
@@ -1071,7 +1092,7 @@ function getDirectorUiHeight(editor) {
         return batchH + 100;
     }
     if (editor?.getDirectorMode?.() === "fl2v") {
-        let h = getFl2vUiHeight(editor) + 160;
+        let h = getFl2vUiHeight(editor) + 110;
         if (editor?.needsLiveSamplePanel?.()) h += LIVE_SAMPLE_PREVIEW_H + 12;
         return h;
     }
@@ -1578,6 +1599,7 @@ class MiniMaxH3DirectorEditor {
         this._renderPending = false;
         this._settleRenderTimer = null;
         this._settleRenderLateTimer = null;
+        this._promptRenderTimer = null;
         this._lastSeekUiMs = 0;
         this._playCanvasWidth = 0;
         this._pauseSettling = false;
@@ -2209,6 +2231,7 @@ class MiniMaxH3DirectorEditor {
                 <div class="bd-actions">
                     <button type="button" class="bd-btn bd-btn-primary hidden" data-a="r2v-add-group" data-i18n="toolbar.addRefGroup" data-i18n-title="tooltip.addRefGroup">添加素材组</button>
                     <button type="button" class="bd-btn bd-btn-primary" data-a="video" data-i18n="toolbar.uploadVideo">上传视频</button>
+                    <button type="button" class="bd-btn" data-a="video-existing" data-i18n="mediaPicker.pickExistingVideo" data-i18n-title="mediaPicker.pickExistingHint">选已有视频</button>
                     <button type="button" class="bd-btn bd-btn-primary hidden" data-a="fl2v-add-shot" data-i18n="toolbar.addShot" data-i18n-title="tooltip.addShot">添加一组</button>
                     <button type="button" class="bd-btn" data-a="video-append" data-i18n="toolbar.appendVideo" data-i18n-title="tooltip.appendVideo">追加视频</button>
                     <button type="button" class="bd-btn" data-a="split" data-i18n="toolbar.split">+ 分割</button>
@@ -2406,21 +2429,30 @@ class MiniMaxH3DirectorEditor {
                             <div class="bd-refs-images-wrap" data-r="global-refs-images-wrap">
                                 <div class="bd-r2v-section-head" data-r="global-refs-head">
                                     <span class="bd-label bd-r2v-section-title" data-r="global-refs-label" data-i18n="panel.refImages">参考图 (图片1–9)</span>
-                                    <span class="bd-r2v-section-count" data-r="global-refs-count"></span>
+                                    <span class="bd-r2v-section-actions">
+                                        <button type="button" class="bd-r2v-pick-existing" data-r="global-refs-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                        <span class="bd-r2v-section-count" data-r="global-refs-count"></span>
+                                    </span>
                                 </div>
                                 <div class="bd-refs" data-r="global-refs"></div>
                             </div>
                             <div class="bd-ref-videos-wrap hidden" data-r="global-ref-videos-wrap">
                                 <div class="bd-r2v-section-head" data-r="global-videos-head">
                                     <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionVideos">参考视频</span>
-                                    <span class="bd-r2v-section-count" data-r="global-videos-count"></span>
+                                    <span class="bd-r2v-section-actions">
+                                        <button type="button" class="bd-r2v-pick-existing" data-r="global-videos-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                        <span class="bd-r2v-section-count" data-r="global-videos-count"></span>
+                                    </span>
                                 </div>
                                 <div class="bd-ref-videos" data-r="global-ref-videos"></div>
                             </div>
                             <div class="bd-ref-audios-wrap hidden" data-r="global-ref-audios-wrap">
                                 <div class="bd-r2v-section-head" data-r="global-audios-head">
                                     <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionAudios">参考音频</span>
-                                    <span class="bd-r2v-section-count" data-r="global-audios-count"></span>
+                                    <span class="bd-r2v-section-actions">
+                                        <button type="button" class="bd-r2v-pick-existing" data-r="global-audios-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                        <span class="bd-r2v-section-count" data-r="global-audios-count"></span>
+                                    </span>
                                 </div>
                                 <div class="bd-ref-audios" data-r="global-ref-audios"></div>
                             </div>
@@ -2461,14 +2493,20 @@ class MiniMaxH3DirectorEditor {
                         <div class="bd-refs-images-wrap" data-r="seg-refs-images-wrap">
                             <div class="bd-r2v-section-head" data-r="seg-refs-head">
                                 <span class="bd-label bd-r2v-section-title" data-r="seg-refs-label" data-i18n="panel.segmentRefImages">片段参考图 (图片1–9)</span>
-                                <span class="bd-r2v-section-count" data-r="seg-refs-count"></span>
+                                <span class="bd-r2v-section-actions">
+                                    <button type="button" class="bd-r2v-pick-existing" data-r="seg-refs-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                    <span class="bd-r2v-section-count" data-r="seg-refs-count"></span>
+                                </span>
                             </div>
                             <div class="bd-refs" data-r="seg-refs"></div>
                         </div>
                         <div class="bd-ref-audios-wrap hidden" data-r="seg-ref-audios-wrap">
                             <div class="bd-r2v-section-head" data-r="seg-audios-head">
                                 <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionAudios">参考音频</span>
-                                <span class="bd-r2v-section-count" data-r="seg-audios-count"></span>
+                                <span class="bd-r2v-section-actions">
+                                    <button type="button" class="bd-r2v-pick-existing" data-r="seg-audios-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                    <span class="bd-r2v-section-count" data-r="seg-audios-count"></span>
+                                </span>
                             </div>
                             <div class="bd-ref-audios" data-r="seg-ref-audios"></div>
                         </div>
@@ -2608,6 +2646,7 @@ class MiniMaxH3DirectorEditor {
         this.genSegFc = this.root.querySelector('[data-r="gen-seg-fc"]');
         this.controlsBar = this.root.querySelector(".bd-controls");
         this.btnVideo = this.root.querySelector('[data-a="video"]');
+        this.btnVideoExisting = this.root.querySelector('[data-a="video-existing"]');
         this.btnFl2vAddShot = this.root.querySelector('[data-a="fl2v-add-shot"]');
         this.btnVideoAppend = this.root.querySelector('[data-a="video-append"]');
         this.outHint = this.root.querySelector('[data-r="out-hint"]');
@@ -2667,6 +2706,7 @@ class MiniMaxH3DirectorEditor {
             el.onclick = (e) => { stopDomEvent(e); fn(); };
         };
         bind('[data-a="video"]', () => this.pickVideoFile());
+        bind('[data-a="video-existing"]', () => { void this.pickExistingVideoFile(); });
         bind('[data-a="fl2v-add-shot"]', () => openFl2vUpload(this));
         bind('[data-a="r2v-add-group"]', () => addImageBatchGroup(this));
         bind('[data-a="video-append"]', () => this.pickAppendVideoFile());
@@ -2861,6 +2901,26 @@ class MiniMaxH3DirectorEditor {
 
         this.genGlobalImg?.addEventListener("click", (e) => { stopDomEvent(e); this.pickGenSrcImage(true); });
         this.genSegImg?.addEventListener("click", (e) => { stopDomEvent(e); this.pickGenSrcImage(false); });
+        this.root.querySelector('[data-r="global-refs-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingRef(true);
+        });
+        this.root.querySelector('[data-r="seg-refs-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingRef(false);
+        });
+        this.root.querySelector('[data-r="global-videos-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingR2vCommonVideo();
+        });
+        this.root.querySelector('[data-r="global-audios-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingRefAudio(true);
+        });
+        this.root.querySelector('[data-r="seg-audios-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingRefAudio(false);
+        });
         this.genDefaultFc?.addEventListener("change", () => this.onGenDefaultFcChange());
         this.genSegFc?.addEventListener("change", () => this.onGenSegFcChange());
 
@@ -2994,6 +3054,8 @@ class MiniMaxH3DirectorEditor {
         clearTimeout(this._syncTimer);
         clearTimeout(this._settleRenderTimer);
         clearTimeout(this._settleRenderLateTimer);
+        clearTimeout(this._promptRenderTimer);
+        this._promptRenderTimer = null;
         this._settleRenderTimer = null;
         this._settleRenderLateTimer = null;
         cancelAnimationFrame(this._resizeRaf);
@@ -3951,6 +4013,7 @@ class MiniMaxH3DirectorEditor {
         const showBatchExport = (isBatch && isVideoBatchTask(taskKey)) || isFl2v;
         // t2v / i2v / r2v: never show source-video upload (fl2v keeps "上传图片").
         this.btnVideo?.classList.toggle("hidden", (hideVideoUpload && !isFl2v) || isR2v);
+        this.btnVideoExisting?.classList.toggle("hidden", hideVideoUpload || isFl2v || isR2v);
         this.btnVideoAppend?.classList.toggle("hidden", hideVideoUpload || isFl2v || isR2v);
         // Playback / seek / zoom are for source-video (v2v) and fl2v preview. r2v has no source clip.
         this.controlsBar?.classList.toggle("hidden", !isFl2v && !isR2v && (hideTimeline || isBatch));
@@ -4188,6 +4251,41 @@ class MiniMaxH3DirectorEditor {
             if (input.files?.[0]) this.loadReferenceVideoFile(input.files[0]);
         };
         input.click();
+    }
+
+    async pickExistingReferenceVideo() {
+        if (!taskUsesReferenceVideo(this._activeRefVideoTaskKey())) return;
+        const currentValue = this.getRefVideoTarget()?.referenceVideo?.videoFile || "";
+        const picked = await this.chooseVideoInput({
+            title: t("mediaPicker.pickReferenceVideo"),
+            currentValue,
+        });
+        if (!picked?.relPath) return;
+        const slotEl = this.isGlobalMode() ? this.globalRefVideo : this.segRefVideo;
+        const nameEl = this.isGlobalMode() ? this.globalRefVideoNameEl : this.segRefVideoNameEl;
+        const status = t("upload.inProgress", { name: picked.fileName || picked.relPath });
+        if (slotEl) {
+            slotEl.classList.remove("has-img", "has-video");
+            slotEl.textContent = status;
+        }
+        if (nameEl) nameEl.textContent = status;
+        try {
+            const prep = await this._prepareVideoFrames({
+                fileName: picked.fileName || picked.relPath,
+                relPath: picked.relPath,
+                subfolder: picked.subfolder || "",
+                type: picked.type || "input",
+                statusPrefix: t("parse.refVideo"),
+                syncNativeFps: false,
+            });
+            this.getRefVideoTarget().referenceVideo = this._buildClipRecord(prep);
+            this.renderRefVideoSlot();
+            this.commit(false, { syncTimeline: true });
+        } catch (err) {
+            console.error("[MiniMax H3Director] reference video load failed:", err);
+            if (nameEl) nameEl.textContent = t("upload.refVideoFailed", { err: formatUploadError(err) });
+            this.renderRefVideoSlot();
+        }
     }
 
     clearReferenceVideo() {
@@ -6183,6 +6281,41 @@ class MiniMaxH3DirectorEditor {
         input.click();
     }
 
+    async pickExistingVideoFile() {
+        if (this.isFl2vMode()) return;
+        try {
+            const picked = await this.chooseVideoInput({
+                title: t("mediaPicker.pickVideo"),
+                currentValue: this.timeline.video?.videoFile || "",
+            });
+            if (!picked?.relPath) return;
+            const btn = this.root.querySelector('[data-a="video-existing"]');
+            if (btn) { btn.disabled = true; btn.textContent = t("common.analyzing"); }
+            this.videoNameEl.textContent = t("upload.inProgress", { name: picked.fileName || picked.relPath });
+            try {
+                this._resetTimelineForReplaceUpload();
+                await this._applyLoadedVideo({
+                    fileName: picked.fileName || picked.relPath,
+                    relPath: picked.relPath,
+                    subfolder: picked.subfolder || "",
+                    type: picked.type || "input",
+                    statusPrefix: t("parse.prefix"),
+                });
+            } catch (err) {
+                console.error("[MiniMax H3Director] video load failed:", err);
+                this.videoNameEl.textContent = t("upload.loadFailed", { err: formatUploadError(err) });
+                this._resetTimelineForReplaceUpload();
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = t("mediaPicker.pickExistingVideo");
+                }
+            }
+        } catch (err) {
+            console.error("[MiniMax H3Director] video pick failed:", err);
+        }
+    }
+
     pickAppendVideoFile() {
         if (!this.hasVideo()) {
             this.showBdMessage(
@@ -6372,6 +6505,325 @@ class MiniMaxH3DirectorEditor {
             this._modalEl = overlay;
             okBtn.focus();
         });
+    }
+
+    pickLocalFile(accept = "") {
+        return new Promise((resolve) => {
+            const input = document.createElement("input");
+            input.type = "file";
+            if (accept) input.accept = accept;
+            input.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none";
+            const cleanup = () => input.remove();
+            input.onchange = () => {
+                const file = input.files?.[0] || null;
+                cleanup();
+                resolve(file);
+            };
+            input.addEventListener("cancel", () => {
+                cleanup();
+                resolve(null);
+            }, { once: true });
+            document.body.appendChild(input);
+            input.click();
+        });
+    }
+
+    async listInputMedia(kind) {
+        const resp = await api.fetchApi(`/minimax/director/list_input_media?kind=${encodeURIComponent(kind)}`);
+        if (!resp.ok) {
+            const text = (await resp.text()).trim();
+            if (resp.status === 404) throw new Error(t("mediaPicker.needRestart"));
+            throw new Error(text || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        return Array.isArray(data?.items) ? data.items : [];
+    }
+
+    probeInputImageDimensions(relPath, type = "input") {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve({
+                width: img.naturalWidth || img.width || 0,
+                height: img.naturalHeight || img.height || 0,
+            });
+            img.onerror = () => resolve({ width: 0, height: 0 });
+            img.src = inputViewUrl(relPath, type || "input");
+        });
+    }
+
+    showInputMediaPicker({ kind, title, accept, currentValue = "" } = {}) {
+        return new Promise((resolve) => {
+            this._closeBdModal();
+
+            const overlay = document.createElement("div");
+            overlay.className = "bd-modal-overlay";
+            const panel = document.createElement("div");
+            panel.className = "bd-modal bd-media-modal";
+            panel.innerHTML = `
+                <div class="bd-modal-title"></div>
+                <div class="bd-media-toolbar">
+                    <div class="bd-media-status"></div>
+                    <div class="bd-modal-actions"></div>
+                </div>
+                <div class="bd-media-body">
+                    <div class="bd-media-left">
+                        <select class="bd-media-select" size="12"></select>
+                    </div>
+                    <div class="bd-media-right">
+                        <div class="bd-media-preview">
+                            <div class="bd-media-preview-empty"></div>
+                        </div>
+                        <div class="bd-media-meta"></div>
+                    </div>
+                </div>`;
+
+            panel.querySelector(".bd-modal-title").textContent = title || "";
+            const statusEl = panel.querySelector(".bd-media-status");
+            const actionsTop = panel.querySelector(".bd-modal-actions");
+            const selectEl = panel.querySelector(".bd-media-select");
+            const previewEl = panel.querySelector(".bd-media-preview");
+            const previewEmptyEl = panel.querySelector(".bd-media-preview-empty");
+            const metaEl = panel.querySelector(".bd-media-meta");
+
+            let selectedValue = currentValue || "";
+            let itemsByPath = new Map();
+
+            const finish = (val) => {
+                this._closeBdModal();
+                resolve(val);
+            };
+
+            const renderPreview = (item) => {
+                previewEl.innerHTML = "";
+                metaEl.innerHTML = "";
+                if (!item?.relPath) {
+                    previewEmptyEl.textContent = t("mediaPicker.previewEmpty");
+                    previewEl.appendChild(previewEmptyEl);
+                    return;
+                }
+                const relPath = item.relPath;
+                const type = item.type || "input";
+            if (kind === "image") {
+                const img = document.createElement("img");
+                img.src = inputViewUrl(relPath, type);
+                img.alt = item.fileName || item.name || relPath;
+                previewEl.appendChild(img);
+            } else if (kind === "audio") {
+                const audio = document.createElement("audio");
+                audio.src = inputViewUrl(relPath, type);
+                audio.controls = true;
+                audio.preload = "metadata";
+                previewEl.appendChild(audio);
+            } else {
+                const video = document.createElement("video");
+                video.src = inputViewUrl(relPath, type);
+                video.controls = true;
+                video.preload = "metadata";
+                video.muted = true;
+                video.playsInline = true;
+                previewEl.appendChild(video);
+            }
+                const fileEl = document.createElement("div");
+                fileEl.textContent = `${t("mediaPicker.file")}: ${item.fileName || item.name || relPath}`;
+                metaEl.appendChild(fileEl);
+                const pathEl = document.createElement("div");
+                pathEl.textContent = `${t("mediaPicker.path")}: ${relPath}`;
+                metaEl.appendChild(pathEl);
+            };
+
+            const loadItems = async () => {
+                statusEl.textContent = t("mediaPicker.loading");
+                selectEl.innerHTML = "";
+                renderPreview(null);
+                try {
+                    const items = await this.listInputMedia(kind);
+                    itemsByPath = new Map(items.map((item) => [item.relPath, item]));
+                    for (const item of items) {
+                        const option = document.createElement("option");
+                        option.value = item.relPath;
+                        option.textContent = item.relPath;
+                    if (item.relPath === selectedValue) option.selected = true;
+                    selectEl.appendChild(option);
+                }
+                if (selectedValue && itemsByPath.has(selectedValue)) {
+                    selectEl.value = selectedValue;
+                } else {
+                    selectedValue = selectEl.value || "";
+                }
+                renderPreview(itemsByPath.get(selectEl.value || selectedValue || ""));
+                    statusEl.textContent = items.length
+                        ? t("mediaPicker.count", { n: items.length })
+                        : t("mediaPicker.empty");
+                } catch (err) {
+                    statusEl.textContent = err?.message || String(err);
+                }
+            };
+
+            selectEl.addEventListener("change", () => {
+                selectedValue = selectEl.value || "";
+                renderPreview(itemsByPath.get(selectedValue));
+            });
+            selectEl.addEventListener("dblclick", () => {
+                const item = itemsByPath.get(selectEl.value || "");
+                if (!item) return;
+                finish({
+                    source: "existing",
+                    relPath: item.relPath,
+                    fileName: item.fileName || item.name || item.relPath,
+                    subfolder: item.subfolder || "",
+                    type: item.type || "input",
+                });
+            });
+
+            const refreshBtn = document.createElement("button");
+            refreshBtn.type = "button";
+            refreshBtn.className = "bd-btn";
+            refreshBtn.textContent = t("mediaPicker.refresh");
+            refreshBtn.onclick = () => { void loadItems(); };
+            actionsTop.appendChild(refreshBtn);
+
+            const uploadBtn = document.createElement("button");
+            uploadBtn.type = "button";
+            uploadBtn.className = "bd-btn";
+            uploadBtn.textContent = t("mediaPicker.upload");
+            uploadBtn.onclick = async () => {
+                const file = await this.pickLocalFile(accept || "");
+                if (file) finish({ source: "file", file });
+            };
+            actionsTop.appendChild(uploadBtn);
+
+            const actionsBottom = document.createElement("div");
+            actionsBottom.className = "bd-modal-actions";
+            const cancelBtn = document.createElement("button");
+            cancelBtn.type = "button";
+            cancelBtn.className = "bd-btn";
+            cancelBtn.textContent = t("dialog.cancel");
+            cancelBtn.onclick = () => finish(null);
+            actionsBottom.appendChild(cancelBtn);
+
+            const okBtn = document.createElement("button");
+            okBtn.type = "button";
+            okBtn.className = "bd-btn bd-btn-primary";
+            okBtn.textContent = t("mediaPicker.useSelected");
+            okBtn.onclick = () => {
+                const item = itemsByPath.get(selectEl.value || selectedValue || "");
+                if (!item) return;
+                finish({
+                    source: "existing",
+                    relPath: item.relPath,
+                    fileName: item.fileName || item.name || item.relPath,
+                    subfolder: item.subfolder || "",
+                    type: item.type || "input",
+                });
+            };
+            actionsBottom.appendChild(okBtn);
+            panel.appendChild(actionsBottom);
+
+            overlay.onclick = (e) => {
+                if (e.target === overlay) finish(null);
+            };
+            panel.onclick = (e) => e.stopPropagation();
+
+            this._modalKeyHandler = (e) => {
+                if (e.key === "Escape") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    finish(null);
+                } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    okBtn.click();
+                }
+            };
+            window.addEventListener("keydown", this._modalKeyHandler, true);
+
+            overlay.appendChild(panel);
+            this.root.appendChild(overlay);
+            this._modalEl = overlay;
+            void loadItems();
+            selectEl.focus();
+        });
+    }
+
+    async chooseImageInput(opts = {}) {
+        const choice = await this.showInputMediaPicker({
+            kind: "image",
+            title: opts.title || t("mediaPicker.pickImage"),
+            accept: "image/*,.jpg,.jpeg,.png,.webp,.bmp,.gif,.tif,.tiff",
+            currentValue: opts.currentValue || "",
+        });
+        if (!choice) return null;
+        if (choice.source === "file" && choice.file) {
+            const uploaded = await uploadToInput(choice.file);
+            const relPath = videoRelativePath(uploaded);
+            const dims = await this.probeInputImageDimensions(relPath, uploaded.type || "input");
+            return {
+                imageFile: relPath,
+                fileName: uploaded?.name || choice.file.name || relPath,
+                subfolder: uploaded?.subfolder || "",
+                type: uploaded?.type || "input",
+                width: dims.width || 0,
+                height: dims.height || 0,
+            };
+        }
+        const dims = await this.probeInputImageDimensions(choice.relPath, choice.type || "input");
+        return {
+            imageFile: choice.relPath,
+            fileName: choice.fileName || choice.relPath,
+            subfolder: choice.subfolder || "",
+            type: choice.type || "input",
+            width: dims.width || 0,
+            height: dims.height || 0,
+        };
+    }
+
+    async chooseVideoInput(opts = {}) {
+        const choice = await this.showInputMediaPicker({
+            kind: "video",
+            title: opts.title || t("mediaPicker.pickVideo"),
+            accept: "video/*,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
+            currentValue: opts.currentValue || "",
+        });
+        if (!choice) return null;
+        if (choice.source === "file" && choice.file) {
+            const uploaded = await uploadToInputSmart(choice.file);
+            return {
+                relPath: videoRelativePath(uploaded),
+                fileName: uploaded?.name || choice.file.name || "",
+                subfolder: uploaded?.subfolder || "",
+                type: uploaded?.type || "input",
+            };
+        }
+        return {
+            relPath: choice.relPath,
+            fileName: choice.fileName || choice.relPath,
+            subfolder: choice.subfolder || "",
+            type: choice.type || "input",
+        };
+    }
+
+    async chooseAudioInput(opts = {}) {
+        const choice = await this.showInputMediaPicker({
+            kind: "audio",
+            title: opts.title || t("mediaPicker.pickAudio"),
+            accept: "audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac",
+            currentValue: opts.currentValue || "",
+        });
+        if (!choice) return null;
+        if (choice.source === "file" && choice.file) {
+            const uploaded = await uploadToInput(choice.file);
+            return {
+                relPath: videoRelativePath(uploaded),
+                fileName: uploaded?.name || choice.file.name || "",
+                subfolder: uploaded?.subfolder || "",
+                type: uploaded?.type || "input",
+            };
+        }
+        return {
+            relPath: choice.relPath,
+            fileName: choice.fileName || choice.relPath,
+            subfolder: choice.subfolder || "",
+            type: choice.type || "input",
+        };
     }
 
     async _prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix, syncNativeFps = true }) {
@@ -8472,6 +8924,10 @@ class MiniMaxH3DirectorEditor {
             highestFilled = Math.max(highestFilled, idx);
         }
         if (countEl) countEl.textContent = polished ? `${filled}/${PIC_SLOTS}` : "";
+        this._syncPickExistingDisabled(
+            isGlobal ? '[data-r="global-refs-pick"]' : '[data-r="seg-refs-pick"]',
+            filled >= PIC_SLOTS,
+        );
 
         if (!this._rv2vPicsVisible) this._rv2vPicsVisible = {};
         const visKey = isGlobal ? "global" : `seg:${target?.id ?? this.selectedIndex}`;
@@ -8691,6 +9147,10 @@ class MiniMaxH3DirectorEditor {
             if (r?.audioFile || r?.fileName) filled += 1;
         }
         if (countEl) countEl.textContent = polished ? `${filled}/${MAX_REFERENCE_AUDIOS}` : "";
+        this._syncPickExistingDisabled(
+            isGlobal ? '[data-r="global-audios-pick"]' : '[data-r="seg-audios-pick"]',
+            filled >= MAX_REFERENCE_AUDIOS,
+        );
 
         box.innerHTML = "";
         for (let i = 0; i < MAX_REFERENCE_AUDIOS; i++) {
@@ -8858,6 +9318,7 @@ class MiniMaxH3DirectorEditor {
         if (this.globalVideosCount) {
             this.globalVideosCount.textContent = `${filled}/${MAX_REFERENCE_VIDEOS}`;
         }
+        this._syncPickExistingDisabled('[data-r="global-videos-pick"]', filled >= MAX_REFERENCE_VIDEOS);
         box.innerHTML = "";
         for (let i = 0; i < MAX_REFERENCE_VIDEOS; i++) {
             const el = document.createElement("div");
@@ -8980,6 +9441,42 @@ class MiniMaxH3DirectorEditor {
         input.click();
     }
 
+    async pickExistingR2vCommonVideo() {
+        const target = (this.timeline.global = this.timeline.global || {
+            refs: [], refAudios: [], refVideos: [],
+        });
+        target.refVideos = target.refVideos || [];
+        const index = Array.from({ length: MAX_REFERENCE_VIDEOS }, (_, i) => i)
+            .find((i) => !target.refVideos.some((r) => Number(r.index ?? r.slot) === i && (r.videoFile || r.fileName)));
+        if (index == null) {
+            alert(t("mediaPicker.slotsFull"));
+            return;
+        }
+        try {
+            const picked = await this.chooseVideoInput({
+                title: t("mediaPicker.pickReferenceVideo"),
+            });
+            if (!picked?.relPath) return;
+            target.refVideos = target.refVideos.filter((r) => Number(r.index ?? r.slot) !== index);
+            target.refVideos.push({
+                index,
+                videoFile: picked.relPath,
+                fileName: picked.fileName || picked.relPath,
+                type: picked.type || "input",
+                subfolder: picked.subfolder || "",
+            });
+            if (this.isR2vCommonEnabled()) {
+                rebaseR2vGroupSlotsForCommon(this);
+                this.renderImageBatchGroups?.();
+            }
+            this.commit();
+            this.renderR2vCommonVideoSlots();
+        } catch (err) {
+            console.error("[MiniMax H3Director] common ref video pick failed:", err);
+            alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
+        }
+    }
+
     async addR2vCommonVideoFromFile(file, slotIndex = null) {
         if (!file) return;
         const target = (this.timeline.global = this.timeline.global || {
@@ -9023,6 +9520,101 @@ class MiniMaxH3DirectorEditor {
             if (file) this.addRefFromFile(file, target, index, isGlobal);
         };
         input.click();
+    }
+
+    _nextEmptyMediaSlot(items, max, hasFn) {
+        for (let i = 0; i < max; i++) {
+            const hit = (items || []).find((r) => Number(r.index ?? r.slot) === i);
+            if (!hasFn(hit)) return i;
+        }
+        return -1;
+    }
+
+    _syncPickExistingDisabled(selector, disabled) {
+        const btn = this.root?.querySelector(selector);
+        if (!btn) return;
+        btn.disabled = !!disabled;
+        btn.title = disabled ? t("mediaPicker.slotsFull") : t("mediaPicker.pickExistingHint");
+    }
+
+    async pickExistingRef(isGlobal) {
+        const target = isGlobal
+            ? (this.timeline.global = this.timeline.global || { refs: [] })
+            : this.timeline.segments[this.selectedIndex];
+        if (!target) return;
+        target.refs = target.refs || [];
+        const index = this._nextEmptyMediaSlot(
+            target.refs,
+            MAX_REFERENCE_IMAGES,
+            (r) => !!(r?.imageFile || r?.imageB64),
+        );
+        if (index < 0) {
+            alert(t("mediaPicker.slotsFull"));
+            return;
+        }
+        try {
+            const picked = await this.chooseImageInput({
+                title: t("mediaPicker.pickReferenceImage"),
+            });
+            if (!picked?.imageFile) return;
+            target.refs = target.refs.filter((r) => Number(r.index ?? r.slot) !== index);
+            target.refs.push({ index, imageFile: picked.imageFile, imageB64: "" });
+            if (isGlobal) {
+                this.timeline.global = target;
+                if (this.isR2vCommonEnabled()) {
+                    rebaseR2vGroupSlotsForCommon(this);
+                    this.renderImageBatchGroups?.();
+                }
+            }
+            this.commit();
+            this.renderRefSlots(
+                target.refs,
+                isGlobal ? this.globalRefsBox : this.segRefsBox,
+                isGlobal,
+            );
+        } catch (err) {
+            console.error("[MiniMax H3Director] ref pick failed:", err);
+        }
+    }
+
+    async pickExistingRefAudio(isGlobal) {
+        const target = isGlobal
+            ? (this.timeline.global = this.timeline.global || { refs: [], refAudios: [] })
+            : this.timeline.segments[this.selectedIndex];
+        if (!target) return;
+        target.refAudios = target.refAudios || [];
+        const index = this._nextEmptyMediaSlot(
+            target.refAudios,
+            MAX_REFERENCE_AUDIOS,
+            (r) => !!(r?.audioFile || r?.fileName),
+        );
+        if (index < 0) {
+            alert(t("mediaPicker.slotsFull"));
+            return;
+        }
+        try {
+            const picked = await this.chooseAudioInput({
+                title: t("mediaPicker.pickReferenceAudio"),
+            });
+            if (!picked?.relPath) return;
+            target.refAudios = target.refAudios.filter((r) => Number(r.index ?? r.slot) !== index);
+            target.refAudios.push({
+                index,
+                audioFile: picked.relPath,
+                fileName: picked.fileName || picked.relPath,
+                type: picked.type || "input",
+                subfolder: picked.subfolder || "",
+            });
+            if (this.isR2vCommonEnabled() && isGlobal) {
+                rebaseR2vGroupSlotsForCommon(this);
+                this.renderImageBatchGroups?.();
+            }
+            this.commit();
+            this.renderRefAudioSlots();
+        } catch (err) {
+            console.error("[MiniMax H3Director] ref audio pick failed:", err);
+            alert(t("upload.refAudioFailed", { err: err?.message || err }));
+        }
     }
 
     async addRefFromFile(file, target, slotIndex = null, isGlobal = null) {
@@ -9071,7 +9663,17 @@ class MiniMaxH3DirectorEditor {
         }
         if (field === "prompt" && this.globalPromptWidget) this.globalPromptWidget.value = value;
         this.scheduleTimelineSync();
-        this.scheduleRender();
+        if (field === "prompt") this._schedulePromptRender();
+        else this.scheduleRender();
+    }
+
+    /** Debounced render for prompt typing — avoids full canvas redraw on every keystroke. */
+    _schedulePromptRender() {
+        if (this._promptRenderTimer != null) return;
+        this._promptRenderTimer = setTimeout(() => {
+            this._promptRenderTimer = null;
+            this.scheduleRender();
+        }, 160);
     }
 
     onSegField(field, value) {
@@ -9079,7 +9681,7 @@ class MiniMaxH3DirectorEditor {
         if (!seg) return;
         seg[field] = value;
         this.scheduleTimelineSync();
-        this.scheduleRender();
+        this._schedulePromptRender();
     }
 
     onNegativePrompt(value) {
