@@ -1955,23 +1955,8 @@ function mountVideoPreview(el, seg, running, fps, editor) {
     const state = { playing: false, timer: null, idx: 0, images: null, lastFrame: 0 };
     _players.set(wrap, state);
 
-    loadFrameImages(frames).then((images) => {
-        state.images = images;
-        drawFrame(canvas, images[0]);
-    }).catch(() => {
-        meta.textContent = t("batch.previewLoadFailed");
-    });
-
-    playBtn.onclick = (e) => {
-        e.stopPropagation();
-        if (!state.images?.length) return;
-        if (state.playing) {
-            state.playing = false;
-            if (state.timer) cancelAnimationFrame(state.timer);
-            state.timer = null;
-            playBtn.textContent = t("batch.play");
-            return;
-        }
+    const startPlayback = () => {
+        if (!state.images?.length || state.playing) return;
         state.playing = true;
         state.lastFrame = 0;
         playBtn.textContent = t("batch.pause");
@@ -1987,6 +1972,29 @@ function mountVideoPreview(el, seg, running, fps, editor) {
             state.timer = requestAnimationFrame(tick);
         };
         state.timer = requestAnimationFrame(tick);
+    };
+    const stopPlayback = () => {
+        state.playing = false;
+        if (state.timer) cancelAnimationFrame(state.timer);
+        state.timer = null;
+        playBtn.textContent = t("batch.play");
+    };
+
+    loadFrameImages(frames).then((images) => {
+        state.images = images;
+        drawFrame(canvas, images[0]);
+        if (seg.previewAutoplay) {
+            seg.previewAutoplay = false;
+            startPlayback();
+        }
+    }).catch(() => {
+        meta.textContent = t("batch.previewLoadFailed");
+    });
+
+    playBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (state.playing) stopPlayback();
+        else startPlayback();
     };
 }
 
@@ -2607,6 +2615,9 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
     if (extra.step != null) seg.previewStep = extra.step;
     if (extra.total_steps != null) seg.previewTotalSteps = extra.total_steps;
     if (Array.isArray(extra.frames) && extra.frames.length) {
+        // Final payload: autoplay the card preview so a finished segment does not
+        // sit frozen on its first frame.
+        seg.previewAutoplay = seg.previewLive || !seg.previewFrames?.length;
         seg.previewFrames = extra.frames;
         seg.previewFps = extra.fps || seg.previewFps || 24;
         seg.previewLive = false;

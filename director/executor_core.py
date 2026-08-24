@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import datetime
 from typing import Any
 
@@ -80,9 +81,12 @@ from .vram_cleanup import cleanup_segment_vram
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
 
 # 每段发送到浏览器的预览帧上限（首帧必含，末帧保证，其余均匀抽样）。
-_MAX_PREVIEW_FRAMES = 12
-# 每段实时 TAE 预览的最大次数（节流，避免每个 diffusion step 都 decode 一次）。
-_MAX_LIVE_PREVIEWS = 12
+# 上限给足：24fps 下 96 帧 ≈ 4s 连贯回放；配合 max_side 缩帧控制内存。
+_MAX_PREVIEW_FRAMES = 96
+# 回放抽帧缩放：超过该最长边的帧先缩小再编码 JPEG（控制 websocket/浏览器内存）。
+_PREVIEW_FRAME_MAX_SIDE = 480
+# 实时 TAE 预览最小间隔（秒）：按墙钟节流，采样快时也不至于每 step 都 decode。
+_LIVE_PREVIEW_MIN_INTERVAL = 0.4
 
 
 def _unpack_node_output(out):
@@ -286,12 +290,6 @@ def _prune_completed_tensors(completed: dict[int, Any], keep: int, label: str) -
             "Pruned %s for segment(s) %s; keeping #%d (prev only)",
             label, [i + 1 for i in stale], keep + 1,
         )
-
-
-def _live_preview_every(steps: int) -> int:
-    """TAE 实时预览节流：每段最多约 _MAX_LIVE_PREVIEWS 次（不再每个 step decode）。"""
-    total = max(1, int(steps or 0))
-    return max(1, math.ceil(total / _MAX_LIVE_PREVIEWS))
 
 
 def execute_director_plan_core(
@@ -926,8 +924,21 @@ def execute_director_plan_core(
                 phase=phase, phase_value=value, phase_max=1, **meta,
             )
 
+        _last_live_preview_ts = None
+
         def _report_step_preview(step: int, total_steps: int, x0) -> None:
             # Live frame for the batch-card preview slot (「生成中…」 area).
+            # Time-based throttle: TAE decode is the expensive part, so check the
+            # clock BEFORE decoding; always send the very last step.
+            nonlocal _last_live_preview_ts
+            now = time.monotonic()
+            if (
+                _last_live_preview_ts is not None
+                and step + 1 < int(total_steps or 0)
+                and (now - _last_live_preview_ts) < _LIVE_PREVIEW_MIN_INTERVAL
+            ):
+                return
+            _last_live_preview_ts = now
             try:
                 from .tae_preview import pil_to_jpeg_b64, x0_to_preview_pil
 
@@ -996,11 +1007,9 @@ def execute_director_plan_core(
                 shift_audio=shift_audio,
                 on_phase=_report_sample_phase,
                 on_step_preview=_report_step_preview if live_tae_preview else None,
-                preview_every=_live_preview_every(
-                    max(1, int(first_pass_sigmas.numel()) - 1)
-                    if first_pass_sigmas is not None
-                    else steps
-                ),
+                # Every step reaches the callback; _report_step_preview throttles
+                # by wall clock (cheaper than decoding TAE to decide).
+                preview_every=1,
                 sigmas=first_pass_sigmas,
             )
 
@@ -1204,7 +1213,7 @@ def execute_director_plan_core(
                 if preview_pick[-1] != n_total - 1:
                     preview_pick.append(n_total - 1)
                 frames_b64 = [
-                    tensor_frame_to_jpeg_b64(decoded[i])
+                    tensor_frame_to_jpeg_b64(decoded[i], max_side=_PREVIEW_FRAME_MAX_SIDE)
                     for i in preview_pick
                 ]
                 h, w = int(decoded.shape[1]), int(decoded.shape[2])
