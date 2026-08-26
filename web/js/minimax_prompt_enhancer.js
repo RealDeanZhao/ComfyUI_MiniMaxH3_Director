@@ -94,6 +94,13 @@ function ensurePeStyles() {
 .minimax-pe-options-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
 .minimax-pe-check-item { display: flex; gap: 4px; align-items: center; }
 .minimax-pe-check-item span { font-size: 11px; color: #b8c0d0; }
+.minimax-pe-cancel-btn {
+    font-size: 10px; min-height: 24px; box-sizing: border-box;
+    background: #7f1d1d !important; color: #fecaca !important;
+    border: 1px solid #b91c1c !important; border-radius: 4px;
+    padding: 3px 9px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
+}
+.minimax-pe-progress { font-size: 10px; color: #94a3b8; white-space: nowrap; min-width: 42px; text-align: right; }
 `;
     document.head.appendChild(style);
 }
@@ -108,6 +115,23 @@ function el(style, text, tag = "div") {
 function swallowKeys(input) {
     input.addEventListener("keydown", (e) => e.stopPropagation());
     input.addEventListener("keyup", (e) => e.stopPropagation());
+}
+
+function isAbortError(e) { return e?.name === "AbortError"; }
+
+async function readApiError(resp, fallback) {
+    let data = {};
+    try { data = await resp.json(); } catch {}
+    return { data, error: data.error || `${fallback} (HTTP ${resp.status})` };
+}
+
+function networkHint(e) {
+    if (isAbortError(e)) return "已取消操作";
+    const message = String(e?.message || e || "");
+    if (/Failed to fetch|NetworkError|Load failed/i.test(message)) {
+        return `${message}（请确认 LLM 服务已启动、地址/端口正确，且浏览器可访问）`;
+    }
+    return message;
 }
 
 async function fetchImageB64(imageFile) {
@@ -171,37 +195,84 @@ function resolveCharacterDetailLevel(pe, opts) {
 
 export function mountPromptEnhancerPanel(editor, parentEl) {
     ensurePeStyles();
-    const pe = { editor, open: false, _currentDefaultTemplate: "", _busy: false };
+    const pe = {
+        editor, open: false, _currentDefaultTemplate: "", _busy: false,
+        _abortController: null,
+    };
 
-    pe.setStatus = (text, kind = "info") => {
+    pe.setStatus = (text, kind = "info", action = null) => {
         pe.statusEl.textContent = text || "";
         pe.statusEl.style.color = STATUS_COLORS[kind] || STATUS_COLORS.info;
         pe.statusEl.style.fontWeight = kind === "error" ? "600" : "400";
         pe.statusEl.style.whiteSpace = "pre-wrap";
         pe.statusEl.style.lineHeight = "1.35";
+        pe.actionEl.textContent = action?.label || "";
+        pe.actionEl.onclick = action?.run || null;
+        pe.actionEl.style.display = action?.label ? "inline-block" : "none";
+    };
+
+    pe.cancelEnhance = (message = "已取消扩写") => {
+        const controller = pe._abortController;
+        if (!controller) return false;
+        controller.abort();
+        pe._cancelled = true;
+        pe.setStatus(message, "info");
+        return true;
+    };
+
+    pe.setProgressText = (text) => {
+        pe.progressEl.textContent = text || "";
+    };
+
+    pe.updateProgress = (done, total, label = "") => {
+        const prefix = label ? `${label} · ` : "";
+        pe.setProgressText(total > 0 ? `${prefix}${done}/${total}` : "");
     };
 
     pe.setEnhanceLoading = (loading, activeBtn = null, label = "扩写中…") => {
+        const wasBusy = !!pe._busy;
         pe._busy = loading;
         pe.enhanceCurrentBtn.disabled = loading;
         pe.enhanceAllBtn.disabled = loading;
         pe.refreshBtn.disabled = loading;
         pe.unloadBtn.disabled = loading;
         if (loading && activeBtn) {
-            activeBtn.textContent = label;
-            activeBtn.style.background = "#d97706";
-            activeBtn.style.cursor = "wait";
+            if (!wasBusy) {
+                pe._cancelled = false;
+                pe._activeButton = activeBtn;
+                pe._activeButtonLabel = activeBtn.textContent;
+                pe._abortController = new AbortController();
+                pe.cancelBtn.style.display = "inline-block";
+                pe.progressEl.style.display = "inline-block";
+            }
+            if (activeBtn !== pe.cancelBtn) {
+                activeBtn.textContent = label;
+                activeBtn.setAttribute("aria-busy", "true");
+            }
             activeBtn.classList.add("minimax-pe-loading");
-        } else {
-            pe.enhanceCurrentBtn.textContent = "扩写当前提示词";
-            pe.enhanceAllBtn.textContent = "扩写全部提示词";
-            pe.enhanceCurrentBtn.style.background = "#3b82f6";
-            pe.enhanceAllBtn.style.background = "#6366f1";
-            pe.enhanceCurrentBtn.style.cursor = "pointer";
-            pe.enhanceAllBtn.style.cursor = "pointer";
-            pe.enhanceCurrentBtn.classList.remove("minimax-pe-loading");
-            pe.enhanceAllBtn.classList.remove("minimax-pe-loading");
+            if (activeBtn !== pe.cancelBtn) activeBtn.style.cursor = "wait";
+        } else if (!loading) {
+            const btn = pe._activeButton;
+            const savedLabel = pe._activeButtonLabel || (btn === pe.enhanceAllBtn ? "扩写全部提示词" : "扩写当前提示词");
+            if (btn && btn !== pe.cancelBtn) {
+                btn.textContent = savedLabel;
+                btn.removeAttribute("aria-busy");
+                btn.classList.remove("minimax-pe-loading");
+                btn.style.cursor = "pointer";
+            }
+            pe._activeButton = null;
+            pe._activeButtonLabel = "";
+            pe._abortController = null;
+            pe.cancelBtn.style.display = "none";
+            pe.setProgressText("");
+            pe.progressEl.style.display = "none";
         }
+    };
+
+    pe.isCancelled = () => !!pe._cancelled;
+
+    pe.throwIfCancelled = () => {
+        if (pe.isCancelled()) throw new DOMException("Aborted", "AbortError");
     };
 
     const header = el({
@@ -411,10 +482,30 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     utilRow.appendChild(pe.unloadBtn);
     pe.unloadBtnRow = utilRow;
     btnRow.appendChild(utilRow);
+
+    const progressRow = el({ display: "flex", gap: "6px", alignItems: "center", justifyContent: "space-between" });
+    pe.progressEl = el({ fontSize: "10px", color: "#94a3b8", whiteSpace: "nowrap" }, "", "span");
+    pe.progressEl.className = "minimax-pe-progress";
+    pe.progressEl.style.display = "none";
+    pe.cancelBtn = el({
+        background: "#7f1d1d", color: "#fecaca", border: "1px solid #b91c1c",
+        borderRadius: "4px", padding: "3px 9px", fontWeight: "600", fontSize: "10px",
+    }, "取消", "button");
+    pe.cancelBtn.className = "minimax-pe-cancel-btn";
+    pe.cancelBtn.style.display = "none";
+    pe.cancelBtn.onclick = () => pe.cancelEnhance();
+    progressRow.appendChild(pe.progressEl);
+    progressRow.appendChild(pe.cancelBtn);
+    btnRow.appendChild(progressRow);
     pe.body.appendChild(btnRow);
 
-    pe.statusEl = el({ fontSize: "10px", color: STATUS_COLORS.info, minHeight: "16px", padding: "2px 0" });
-    pe.body.appendChild(pe.statusEl);
+    const statusRow = el({ display: "flex", gap: "8px", alignItems: "flex-start" });
+    pe.statusEl = el({ fontSize: "10px", color: STATUS_COLORS.info, minHeight: "16px", padding: "2px 0", flex: "1" });
+    pe.actionEl = el({ fontSize: "10px", color: "#93c5fd", cursor: "pointer", textDecoration: "underline", whiteSpace: "nowrap" }, "", "button");
+    Object.assign(pe.actionEl.style, { display: "none", background: "transparent", border: "0", padding: "2px 0" });
+    statusRow.appendChild(pe.statusEl);
+    statusRow.appendChild(pe.actionEl);
+    pe.body.appendChild(statusRow);
 
     pe.templateArea = document.createElement("textarea");
     pe.templateArea.rows = 4;
@@ -507,6 +598,9 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
 
     pe.fetchModels = async (silent = false) => {
         if (pe._busy) return;
+        pe._modelAbortController?.abort();
+        const modelAbort = new AbortController();
+        pe._modelAbortController = modelAbort;
         try {
             const llmUrl = coerceLlmUrl(pe.urlInput.value, defaultsForApiFormat(pe.apiSelect.value).url);
             pe.urlInput.value = llmUrl;
@@ -521,12 +615,14 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
                     openai_compat_mode: normalizeOpenAiCompatMode(pe.compatSelect?.value),
                     api_key: pe.apiKeyInput.value || "",
                 }),
+                signal: modelAbort.signal,
             });
-            const data = await resp.json();
             if (!resp.ok) {
-                if (!silent) pe.setStatus(data.error || "获取模型失败", "error");
+                const { error } = await readApiError(resp, "获取模型失败");
+                if (!silent) pe.setStatus(error, "error");
                 return;
             }
+            const data = await resp.json();
             pe.modelList.innerHTML = "";
             for (const name of data.models || []) {
                 const o = document.createElement("option");
@@ -537,7 +633,9 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             pe.syncToWidgets();
             if (!silent) pe.setStatus(`${(data.models || []).length} 个模型（可手动输入名称）`, "success");
         } catch (e) {
-            if (!silent) pe.setStatus(`连接失败: ${e.message}`, "error");
+            if (!silent && !isAbortError(e)) pe.setStatus(`连接失败: ${networkHint(e)}`, "error");
+        } finally {
+            if (pe._modelAbortController === modelAbort) pe._modelAbortController = null;
         }
     };
 
@@ -692,46 +790,63 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         return { images, sourceCount, refCount, refSlots, refVideoCount };
     };
 
-    pe.callEnhanceApi = async (prompt, taskKey, block, cfg) => {
+    pe.callEnhanceApi = async (prompt, taskKey, block, cfg, signal = pe._abortController?.signal) => {
         let images = []; let refCount = 0; let sourceCount = 0; let refSlots = []; let refVideoCount = 0;
         try {
+            pe.throwIfCancelled();
             ({
                 images, refCount, sourceCount, refSlots, refVideoCount,
             } = await pe.collectVisionImagesForBlock(block, taskKey));
         } catch (e) {
+            if (isAbortError(e)) throw e;
             console.warn("[MiniMax H3 PE] vision collect failed:", e);
+            pe.setStatus("素材读取失败，将不附带图片继续扩写", "info");
         }
-        const resp = await api.fetchApi("/minimax/director/enhance", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
+        pe.throwIfCancelled();
+        pe.setStatus(images.length ? `正在扩写（附带 ${images.length} 张参考图）…` : "正在扩写…", "loading");
+        try {
+            pe.throwIfCancelled();
+            const resp = await api.fetchApi("/minimax/director/enhance", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
                     llm_url: cfg.llmUrl, model: cfg.model, prompt, task_type: taskKey,
                     image_num: Math.max(1, refCount), images, api_format: cfg.apiFormat,
                     openai_compat_mode: cfg.openaiCompatMode,
                     api_key: cfg.apiKey, output_language: cfg.outputLanguage,
                     character_feature_enhance: cfg.characterFeatureEnhance,
                     source_count: sourceCount, ref_slots: refSlots, ref_video_count: refVideoCount,
-                    llm_unload_after: pe.supportsUnload() && !!pe.unloadCheck.checked, custom_template: cfg.customTemplate,
-                }),
-        });
-        let data = {};
-        try { data = await resp.json(); } catch { data = {}; }
-        return {
-            ok: resp.ok && !!data.response,
-            text: data.response || "",
-            error: data.error || (resp.ok ? "扩写返回为空" : `HTTP ${resp.status}`),
-            hanCount: data.han_count,
-            detailedMode: !!data.detailed_mode,
-            detailTargetHan: data.detail_target_han,
-            vision: { images, sourceCount, refCount },
-        };
+                        llm_unload_after: pe.supportsUnload() && !!pe.unloadCheck.checked, custom_template: cfg.customTemplate,
+                    }),
+                signal,
+            });
+                if (!resp.ok) {
+                const { error } = await readApiError(resp, "扩写请求失败");
+                return { ok: false, text: "", error, vision: { images, sourceCount, refCount } };
+            }
+            let data = {};
+            try { data = await resp.json(); } catch { data = {}; }
+            return {
+                ok: !!data.response,
+                text: data.response || "",
+                error: data.error || (data.response ? "" : "LLM 扩写返回为空；请更换非思考型模型或查看 ComfyUI 日志"),
+                hanCount: data.han_count,
+                detailedMode: !!data.detailed_mode,
+                detailTargetHan: data.detail_target_han,
+                vision: { images, sourceCount, refCount },
+            };
+        } catch (e) {
+            if (isAbortError(e)) throw e;
+            throw new Error(networkHint(e));
+        }
     };
 
-    pe.enhanceOneTarget = async (segmentIndex, cfg, activeBtn, label) => {
+    pe.enhanceOneTarget = async (segmentIndex, cfg, activeBtn, label, ordinal = 0, total = 0) => {
         const { block, taskKey } = pe.getPromptBlock(segmentIndex);
         const prompt = pe.getPromptTextForBlock(segmentIndex);
         if (!prompt) return { ok: false, skipped: true, reason: "empty" };
         pe.setEnhanceLoading(true, activeBtn, label);
+        pe.updateProgress(ordinal, total, label);
         pe.setStatus(`正在扩写: ${label}…`, "loading");
         const result = await pe.callEnhanceApi(prompt, taskKey, block, cfg);
         if (result.ok) {
@@ -776,7 +891,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
                     pe.setStatus(result.error, "error");
                 }
             } catch (e) {
-                pe.setStatus(`请求失败: ${e.message}`, "error");
+                pe.setStatus(isAbortError(e) ? "已取消扩写，原文未修改" : `请求失败: ${networkHint(e)}`, isAbortError(e) ? "info" : "error");
             } finally {
                 pe.setEnhanceLoading(false);
             }
@@ -796,7 +911,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
                     pe.setStatus(r.error || "扩写失败", "error");
                 }
             } catch (e) {
-                pe.setStatus(`请求失败: ${e.message}`, "error");
+                pe.setStatus(isAbortError(e) ? "已取消扩写，原文未修改" : `请求失败: ${networkHint(e)}`, isAbortError(e) ? "info" : "error");
             } finally {
                 pe.setEnhanceLoading(false);
             }
@@ -812,33 +927,91 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
 
         let okCount = 0;
         let lastError = "";
+        let failedTarget = -1;
         try {
             for (let n = 0; n < targets.length; n++) {
+                pe.throwIfCancelled();
                 const idx = targets[n];
                 const label = `片段 ${idx + 1}/${segments.length}`;
-                const r = await pe.enhanceOneTarget(idx, cfg, activeBtn, label);
+                const r = await pe.enhanceOneTarget(idx, cfg, activeBtn, label, n + 1, targets.length);
                 if (r.ok) {
                     okCount += 1;
+                    pe.updateProgress(okCount, targets.length, label);
                     pe.setStatus(`${label} 扩写成功 (${okCount}/${targets.length})`, "loading");
                 } else if (!r.skipped) {
                     lastError = r.error || "未知错误";
-                    pe.setStatus(`${label} 失败: ${lastError}`, "error");
+                    failedTarget = idx;
+                    pe.updateProgress(okCount, targets.length, label);
+                    pe.setStatus(`${label} 失败：${lastError}`, "error", {
+                        label: "重试这一段",
+                        run: () => pe.retryFailedBatch(targets, cfg, activeBtn, failedTarget, okCount),
+                    });
                     break;
                 }
             }
             editor.commit?.(false, { syncTimeline: true });
             editor.updateSelectionUI?.();
-            if (okCount === targets.length) {
+            if (failedTarget < 0 && okCount === targets.length) {
                 pe.setStatus(`全部扩写完成：${okCount} 个分段`, "success");
-            } else if (okCount > 0 && lastError) {
-                pe.setStatus(`部分完成：${okCount}/${targets.length} 成功；失败: ${lastError}`, "error");
+            } else if (failedTarget >= 0 && okCount > 0 && lastError) {
+                pe.setStatus(`已暂停：${okCount}/${targets.length} 成功。${lastError}`, "error", {
+                    label: "重试剩余片段",
+                    run: () => pe.retryFailedBatch(targets, cfg, activeBtn, failedTarget, okCount),
+                });
+            } else if (failedTarget >= 0 && lastError) {
+                pe.setStatus(`扩写失败：${lastError}`, "error", {
+                    label: "重试全部",
+                    run: () => pe.enhancePrompt("all"),
+                });
             }
         } catch (e) {
-            pe.setStatus(`请求失败: ${e.message}`, "error");
+            if (isAbortError(e)) {
+                editor.commit?.(false, { syncTimeline: true });
+                pe.setStatus(`已取消扩写：${okCount}/${targets.length} 成功，未处理片段保留原文`, "info");
+            } else {
+                pe.setStatus(`请求失败: ${networkHint(e)}`, "error", {
+                    label: failedTarget >= 0 ? "重试剩余片段" : "重试全部",
+                    run: () => (failedTarget >= 0
+                        ? pe.retryFailedBatch(targets, cfg, activeBtn, failedTarget, okCount)
+                        : pe.enhancePrompt("all")),
+                });
+            }
         } finally {
             pe.setEnhanceLoading(false);
         }
     };
+
+    pe.retryFailedBatch = async (targets, cfg, activeBtn, failedTarget, alreadyOk = 0) => {
+        if (pe._busy || failedTarget == null || failedTarget < 0) return;
+        const remaining = targets.filter((idx) => Number(idx) >= Number(failedTarget));
+        const totalRemaining = remaining.length;
+        if (!totalRemaining) return;
+        const maxSegment = targets.reduce((max, idx) => Math.max(max, Number(idx) + 1), 0);
+        let done = 0;
+        let nextFailed = -1;
+        let lastError = "";
+        try {
+            for (const idx of remaining) {
+                pe.throwIfCancelled();
+                const label = `片段 ${idx + 1}/${maxSegment}`;
+                const r = await pe.enhanceOneTarget(idx, cfg, activeBtn, label, ++done, totalRemaining);
+                if (r.ok) continue;
+                nextFailed = idx;
+                lastError = r.error || "未知错误";
+                pe.setStatus(`片段 ${idx + 1} 失败：${lastError}`, "error", {
+                    label: "重试剩余片段",
+                    run: () => pe.retryFailedBatch(targets, cfg, activeBtn, nextFailed, alreadyOk + done - 1),
+                });
+                break;
+            }
+            if (nextFailed < 0) pe.setStatus(`剩余片段扩写完成（本次 ${done} 段）`, "success");
+        } catch (e) {
+            pe.setStatus(isAbortError(e) ? `已取消重试：本次完成 ${Math.max(0, done - 1)} 段` : `请求失败: ${networkHint(e)}`, isAbortError(e) ? "info" : "error");
+        } finally {
+            pe.setEnhanceLoading(false);
+        }
+    };
+
 
     pe.unloadModel = async () => {
         const llmUrl = coerceLlmUrl(pe.urlInput.value, defaultsForApiFormat(pe.apiSelect.value).url);
@@ -863,14 +1036,20 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
                     api_key: pe.apiKeyInput.value || "",
                 }),
             });
-            const data = await resp.json();
+            if (!resp.ok) {
+                const { error } = await readApiError(resp, "卸载失败");
+                pe.setStatus(error, "error");
+                return;
+            }
+            let data = {};
+            try { data = await resp.json(); } catch {}
             if (resp.ok && data.status === "unloaded") {
                 pe.setStatus(`${data.provider || "LLM"} 模型已卸载`, "success");
             } else {
                 pe.setStatus(data.error || "卸载失败", "error");
             }
         } catch (e) {
-            pe.setStatus(`卸载失败: ${e.message}`, "error");
+            pe.setStatus(`卸载失败: ${networkHint(e)}`, "error");
         }
     };
     pe.unloadOllama = pe.unloadModel;
