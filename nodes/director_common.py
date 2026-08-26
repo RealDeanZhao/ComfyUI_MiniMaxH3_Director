@@ -80,17 +80,17 @@ def director_perf_inputs() -> dict:
     return {
         "bd_grp_perf": ("BDGROUP", {"default": "性能"}),
         "clear_vram_between_segments": (
-            ["unload_models", "cache_only", "off"],
+            ["adaptive", "unload_models", "cache_only", "off"],
             {
-                "default": "unload_models",
-                "tooltip": "段间显存清理策略：unload_models=卸载模型+清缓存（最省显存，"
-                           "但每段重载模型较慢）；cache_only=只清缓存保留模型（省去重载尖峰，"
-                           "显存充足时推荐）；off=不清理。兼容旧版布尔值（True=unload_models，"
-                           "False=off）。"
-                           " / Segment VRAM cleanup: unload_models=unload model + empty cache "
-                           "(most VRAM-safe, slower); cache_only=empty cache only, keep models "
-                           "(avoids per-segment reload spikes, recommended with spare VRAM); "
-                           "off=skip. Legacy bools still accepted (True=unload_models, False=off).",
+                "default": "adaptive",
+                "tooltip": "段间显存清理策略：adaptive=自适应（默认仅清缓存保留模型，"
+                           "系统内存压力时自动卸载模型，速度与安全兼顾）；unload_models=每段卸载模型+清缓存"
+                           "（最省内存，但每段重载模型较慢）；cache_only=只清缓存保留模型（显存充足时快，"
+                           "长跑有内存风险）；off=不清理。兼容旧版布尔值（True=unload_models，False=off）。"
+                           " / Segment VRAM cleanup: adaptive=soft-clean by default, auto deep-unload "
+                           "on RAM pressure (recommended); unload_models=unload + empty cache every "
+                           "segment (safest, slower); cache_only=empty cache only, keep models; off=skip. "
+                           "Legacy bools still accepted (True=unload_models, False=off).",
             },
         ),
         "export_source_images": (

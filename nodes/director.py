@@ -209,7 +209,7 @@ class MiniMaxH3Director:
         seed=0,
         shift_video=12.0,
         shift_audio=3.0,
-        clear_vram_between_segments="unload_models",
+        clear_vram_between_segments="adaptive",
         export_source_images=False,
         run_mode="full",
         export_type="常规导出",

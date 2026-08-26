@@ -75,7 +75,7 @@ from .segment_continuity import (
     is_continuity_active,
     resolve_prev_segment_output,
 )
-from .vram_cleanup import cleanup_segment_vram
+from .vram_cleanup import cleanup_segment_vram, cleanup_segment_vram_adaptive
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
 
@@ -319,6 +319,7 @@ def execute_director_plan_core(
     live_tae_preview = False if raw_live in (False, 0, "0", "false", "False", "off") else True
 
     # 段间显存清理策略：兼容旧版 BOOLEAN（True=unload_models，False=off）。
+    # adaptive：默认仅清缓存；RAM 压力触发时才深度卸载（兼顾速度与安全）。
     raw_clean = clear_vram_between_segments
     if isinstance(raw_clean, str):
         vram_clean_mode = str(raw_clean).lower().strip()
@@ -328,6 +329,13 @@ def execute_director_plan_core(
         vram_clean_mode = "unload_models"
     vram_clean_on = vram_clean_mode not in ("off", "false", "0")
     vram_unload_models = vram_clean_mode in ("unload", "unload_models", "true", "1")
+    vram_adaptive = vram_clean_mode in ("adaptive", "auto")
+
+    def _segment_boundary_cleanup() -> None:
+        if vram_adaptive:
+            cleanup_segment_vram_adaptive(enabled=True)
+        else:
+            cleanup_segment_vram(enabled=True, unload_models=vram_unload_models)
 
     all_segments = plan.segments
     # Strictly honor「选择运行」— never force-sample unselected segments.
@@ -433,10 +441,13 @@ def execute_director_plan_core(
     if mp4_run_dir is not None:
         reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
     if vram_clean_on:
-        reports.append(
-            "VRAM: 段间清理显存"
-            + ("（卸载模型 + 清缓存）。" if vram_unload_models else "（仅清缓存，保留模型）。")
-        )
+        if vram_adaptive:
+            reports.append("VRAM: 段间清理显存（自适应：默认仅清缓存，内存压力时自动卸载模型）。")
+        else:
+            reports.append(
+                "VRAM: 段间清理显存"
+                + ("（卸载模型 + 清缓存）。" if vram_unload_models else "（仅清缓存，保留模型）。")
+            )
     else:
         reports.append("VRAM: 段间不清理显存。")
     if audio_mode == AUDIO_MODE_MUTE:
@@ -906,8 +917,8 @@ def execute_director_plan_core(
             phase="context_encode", phase_value=1, phase_max=1, **meta,
         )
 
-        if vram_clean_on:
-            cleanup_segment_vram(enabled=True, unload_models=vram_unload_models and seg_total > 1)
+        if vram_clean_on and seg_total > 1:
+            _segment_boundary_cleanup()
 
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(
@@ -1200,7 +1211,7 @@ def execute_director_plan_core(
                 log.debug("Segment video preview skipped: %s", exc)
 
         if vram_clean_on:
-            cleanup_segment_vram(enabled=True, unload_models=vram_unload_models)
+            _segment_boundary_cleanup()
 
         seg_end = datetime.now()
         seg_elapsed = (seg_end - seg_start).total_seconds()
@@ -1227,7 +1238,7 @@ def execute_director_plan_core(
     for seg in all_segments:
         if seg.index in run_indices:
             if vram_clean_on and segment_outputs:
-                cleanup_segment_vram(enabled=True, unload_models=vram_unload_models)
+                _segment_boundary_cleanup()
             chunk, audio_dict, pre_chunk = _run_one_segment(
                 seg, progress_index=progress_pos[seg.index]
             )
