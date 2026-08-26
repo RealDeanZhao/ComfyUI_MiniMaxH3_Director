@@ -132,15 +132,9 @@ def segment_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor | None:
     return None
 
 
-def tensor_frame_to_jpeg_b64(frame: torch.Tensor, *, max_side: int = 0) -> str:
+def tensor_frame_to_jpeg_b64(frame: torch.Tensor) -> str:
     arr = (frame.detach().cpu().clamp(0, 1).numpy() * 255).astype("uint8")
     img = Image.fromarray(arr)
-    if max_side and max(img.size) > max_side:
-        scale = max_side / max(img.size)
-        img = img.resize(
-            (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
-            Image.BILINEAR,
-        )
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=88)
     return base64.b64encode(buf.getvalue()).decode("ascii")

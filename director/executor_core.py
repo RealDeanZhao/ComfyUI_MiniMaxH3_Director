@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import time
 from datetime import datetime
 from typing import Any
 
@@ -79,14 +78,6 @@ from .segment_continuity import (
 from .vram_cleanup import cleanup_segment_vram
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
-
-# 每段发送到浏览器的预览帧上限（首帧必含，末帧保证，其余均匀抽样）。
-# 上限给足：24fps 下 96 帧 ≈ 4s 连贯回放；配合 max_side 缩帧控制内存。
-_MAX_PREVIEW_FRAMES = 96
-# 回放抽帧缩放：超过该最长边的帧先缩小再编码 JPEG（控制 websocket/浏览器内存）。
-_PREVIEW_FRAME_MAX_SIDE = 480
-# 实时 TAE 预览最小间隔（秒）：按墙钟节流，采样快时也不至于每 step 都 decode。
-_LIVE_PREVIEW_MIN_INTERVAL = 0.4
 
 
 def _unpack_node_output(out):
@@ -924,21 +915,8 @@ def execute_director_plan_core(
                 phase=phase, phase_value=value, phase_max=1, **meta,
             )
 
-        _last_live_preview_ts = None
-
         def _report_step_preview(step: int, total_steps: int, x0) -> None:
             # Live frame for the batch-card preview slot (「生成中…」 area).
-            # Time-based throttle: TAE decode is the expensive part, so check the
-            # clock BEFORE decoding; always send the very last step.
-            nonlocal _last_live_preview_ts
-            now = time.monotonic()
-            if (
-                _last_live_preview_ts is not None
-                and step + 1 < int(total_steps or 0)
-                and (now - _last_live_preview_ts) < _LIVE_PREVIEW_MIN_INTERVAL
-            ):
-                return
-            _last_live_preview_ts = now
             try:
                 from .tae_preview import pil_to_jpeg_b64, x0_to_preview_pil
 
@@ -1204,17 +1182,9 @@ def execute_director_plan_core(
 
         if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and decoded.shape[0] >= 1:
             try:
-                # 预览只发抽样帧：全量编码每一帧会带来 CPU 峰值 + websocket/浏览器内存
-                # 尖峰（高分辨率下每段几十~上百张 base64）。上限 _MAX_PREVIEW_FRAMES 帧，
-                # 均匀取样并确保包含最后一帧。
-                n_total = int(decoded.shape[0])
-                preview_step = max(1, math.ceil((n_total - 1) / (_MAX_PREVIEW_FRAMES - 1)))
-                preview_pick = list(range(0, n_total, preview_step))
-                if preview_pick[-1] != n_total - 1:
-                    preview_pick.append(n_total - 1)
                 frames_b64 = [
-                    tensor_frame_to_jpeg_b64(decoded[i], max_side=_PREVIEW_FRAME_MAX_SIDE)
-                    for i in preview_pick
+                    tensor_frame_to_jpeg_b64(decoded[i])
+                    for i in range(int(decoded.shape[0]))
                 ]
                 h, w = int(decoded.shape[1]), int(decoded.shape[2])
                 report_director_segment_preview(
